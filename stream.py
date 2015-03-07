@@ -11,7 +11,7 @@ import os
 from fuel import config
 from fuel.datasets import TextFile
 from fuel.schemes import ConstantScheme
-from fuel.transformers import Merge, Batch, Mapping, SortMapping, Cache, Padding
+from fuel.transformers import Merge, Batch, Filter, Mapping, SortMapping, Cache, Padding
 
 en_vocab, fr_vocab = [os.path.join(config.data_path, 'mt',
                                    '{}_vocab_30000.pkl'.format(lang))
@@ -40,5 +40,10 @@ stream = Merge([en_dataset.get_example_stream(),
                 fr_dataset.get_example_stream()],
                ('english', 'french'))
 
-batched_stream = Batch(stream, iteration_scheme=ConstantScheme(32))
+
+def too_long(sentence_pair):
+    return all([len(sentence) < 50 for sentence in sentence_pair])
+
+filtered_stream = Filter(stream, predicate=too_long)
+batched_stream = Batch(filtered_stream, iteration_scheme=ConstantScheme(32))
 masked_stream = Padding(batched_stream)
