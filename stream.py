@@ -45,5 +45,5 @@ def too_long(sentence_pair):
     return all([len(sentence) < 50 for sentence in sentence_pair])
 
 filtered_stream = Filter(stream, predicate=too_long)
-batched_stream = Batch(filtered_stream, iteration_scheme=ConstantScheme(32))
+batched_stream = Batch(filtered_stream, iteration_scheme=ConstantScheme(64))
 masked_stream = Padding(batched_stream)

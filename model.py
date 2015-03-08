@@ -1,9 +1,9 @@
-#
-# WARNING: VERY UNTESTED
-# This is an encoder-decoder model I slapped together
-# It only works with my changes in Blocks PRs #414 and #423 merged
-# I have no idea whether it actually trains, I haven't run more than 5 epochs
-#
+# This is the original encoder-decoder model
+# It only works with Blocks PR #414 merged. It seems to train, but
+# I haven't monitored validation error, checkpointed or sampled sentences
+# TIP: Without CuDNN Theano seems to move part of the step clipping to CPU
+#      on my computer, which makes things very slow. CuDNN gives a 2x speedup
+#      in my case, so it's worth installing.
 
 from theano import tensor
 
@@ -15,8 +15,7 @@ from blocks.initialization import IsotropicGaussian, Orthogonal, Constant
 from blocks.extensions import Printing
 from blocks.extensions.monitoring import TrainingDataMonitoring
 
-from blocks.bricks import (Tanh, Identity, LinearMaxout, Linear,
-                           Initializable, FeedforwardSequence)
+from blocks.bricks import Tanh, Maxout, Linear, FeedforwardSequence
 from blocks.bricks.lookup import LookupTable
 from blocks.bricks.recurrent import GatedRecurrent
 from blocks.bricks.sequence_generators import (
@@ -38,8 +37,8 @@ y_t = y.dimshuffle(1, 0)
 y_mask_t = y_mask.T
 
 # Encoder
-lookup = LookupTable(30000, 512, name='english_embeddings')
-linear = Linear(input_dim=512, output_dim=1000,
+lookup = LookupTable(30000, 100, name='english_embeddings')
+linear = Linear(input_dim=100, output_dim=1000,
                 weights_init=IsotropicGaussian(0.1), biases_init=Constant(0))
 rnn_input = linear.apply(lookup.apply(x_t))
 
@@ -49,18 +48,13 @@ last_hidden_state = encoder.apply(rnn_input, rnn_input, rnn_input,
                                   mask=x_mask_t)[-1]
 
 
-class InitializableFeedforwardSequence(FeedforwardSequence, Initializable):
-    pass
-
-
 # The decoder
 readout = Readout(source_names=['states', 'feedback'],
                   readout_dim=30000,
                   emitter=SoftmaxEmitter(),
-                  feedback_brick=LookupFeedback(30000, 1000),
-                  merge_prototype=Identity(),
-                  post_merge=InitializableFeedforwardSequence(
-                      [LinearMaxout(output_dim=500, num_pieces=2).apply,
+                  feedback_brick=LookupFeedback(30000, 100),
+                  post_merge=FeedforwardSequence(
+                      [Maxout(num_pieces=2).apply,
                        Linear(input_dim=500).apply]),
                   merged_dim=1000)
 
@@ -82,6 +76,8 @@ sequence_generator.weights_init = IsotropicGaussian(0.1)
 sequence_generator.biases_init = Constant(0)
 sequence_generator.push_initialization_config()
 sequence_generator.transition.weights_init = Orthogonal()
+readout.post_merge.children[1].weights_init = IsotropicGaussian(0.1)
+readout.post_merge.children[1].biases_init = Constant(0)
 lookup.weights_init = IsotropicGaussian(0.1)
 
 encoder.initialize()
@@ -93,7 +89,7 @@ linear.initialize()
 cg = ComputationGraph(cost)
 algorithm = GradientDescent(
     cost=cost, params=cg.parameters,
-    step_rule=CompositeRule([StepClipping(10.0), AdaDelta()])
+    step_rule=CompositeRule([StepClipping(10), AdaDelta()])
 )
 
 # Train!
