@@ -33,8 +33,8 @@ fr_sources = ['commoncrawl.fr-en.fr',
 fr_files = [os.path.join(config.data_path, 'mt', source)
             for source in fr_sources]
 
-en_dataset = TextFile(en_files, cPickle.load(open(en_vocab)))
-fr_dataset = TextFile(fr_files, cPickle.load(open(fr_vocab)))
+en_dataset = TextFile(en_files, cPickle.load(open(en_vocab)), None, None)
+fr_dataset = TextFile(fr_files, cPickle.load(open(fr_vocab)), None)
 
 stream = Merge([en_dataset.get_example_stream(),
                 fr_dataset.get_example_stream()],
