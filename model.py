@@ -78,7 +78,7 @@ readout = Readout(source_names=['states', 'feedback'],
                   post_merge=FeedforwardSequence(
                       [LinearMaxout(output_dim=500, num_pieces=2).apply,
                        Linear(input_dim=500).apply]),
-                  post_merge_input_dim=1000)
+                  merged_dim=1000)
 
 sequence_generator = SequenceGenerator(
     readout=readout,
