@@ -7,7 +7,7 @@
 
 from theano import tensor
 
-from blocks.algorithms import (GradientDescent, StepClipping, Scale,
+from blocks.algorithms import (GradientDescent, StepClipping, AdaDelta,
                                CompositeRule)
 from blocks.main_loop import MainLoop
 from blocks.graph import ComputationGraph
@@ -93,7 +93,7 @@ linear.initialize()
 cg = ComputationGraph(cost)
 algorithm = GradientDescent(
     cost=cost, params=cg.parameters,
-    step_rule=CompositeRule([StepClipping(10.0), Scale(0.01)])
+    step_rule=CompositeRule([StepClipping(10.0), AdaDelta()])
 )
 
 # Train!
