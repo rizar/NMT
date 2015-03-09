@@ -42,12 +42,17 @@ y_mask_t = y_mask.T
 # Encoder
 lookup = LookupTable(30000, 100, name='english_embeddings')
 linear = Linear(input_dim=100, output_dim=1000)
-rnn_input = linear.apply(lookup.apply(x_t))
+update_linear = Linear(input_dim=100, output_dim=1000, use_bias=False)
+reset_linear = Linear(input_dim=100, output_dim=1000, use_bias=False)
+embeddings = lookup.apply(x_t)
+rnn_input = linear.apply(embeddings)
+update_rnn_input = update_linear.apply(embeddings)
+reset_rnn_input = reset_linear.apply(embeddings)
 
 encoder = GatedRecurrent(Tanh(), None, 1000, name='encoder')
 
-last_hidden_state = encoder.apply(rnn_input, rnn_input, rnn_input,
-                                  mask=x_mask_t)[-1]
+last_hidden_state = encoder.apply(rnn_input, update_rnn_input,
+                                  reset_rnn_input, mask=x_mask_t)[-1]
 context_transform = MLP(dims=[1000, 1000], activations=[Tanh()])
 context = context_transform.apply(last_hidden_state)
 
@@ -83,6 +88,8 @@ cost.name = 'cost'
 lookup.weights_init = IsotropicGaussian(0.1)
 linear.weights_init = IsotropicGaussian(0.1)
 linear.biases_init = Constant(0)
+update_linear.weights_init = IsotropicGaussian(0.1)
+reset_linear.weights_init = IsotropicGaussian(0.1)
 encoder.weights_init = Orthogonal()
 context_transform.weights_init = IsotropicGaussian(0.1)
 context_transform.biases_init = Constant(0)
@@ -95,6 +102,8 @@ readout.post_merge.biases_init = Constant(0)
 
 lookup.initialize()
 linear.initialize()
+update_linear.initialize()
+reset_linear.initialize()
 encoder.initialize()
 context_transform.initialize()
 sequence_generator.initialize()
