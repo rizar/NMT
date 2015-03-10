@@ -71,9 +71,15 @@ last_hidden_state = encoder.apply(rnn_input, update_rnn_input,
 # Links from the encoder to the decoder
 output_to_init = MLP(dims=[1000, 1000], activations=[Tanh()])
 output_to_transition = Linear(input_dim=1000, output_dim=1000)
+output_to_update = Linear(input_dim=1000, output_dim=1000, use_bias=False)
+output_to_reset = Linear(input_dim=1000, output_dim=1000, use_bias=False)
 
 decoder_init = output_to_init.apply(last_hidden_state)
 transition_context = output_to_transition.apply(
+    last_hidden_state).dimshuffle('x', 0, 1)
+update_context = output_to_update.apply(
+    last_hidden_state).dimshuffle('x', 0, 1)
+reset_context = output_to_reset.apply(
     last_hidden_state).dimshuffle('x', 0, 1)
 readout_context = last_hidden_state.dimshuffle('x', 0, 1)
 
@@ -85,14 +91,19 @@ class GatedRecurrentWithContext(Initializable):
         self.children = [self.gated_recurrent]
 
     @application(states=['states'], outputs=['states'],
-                 contexts=['readout_context', 'transition_context'])
-    def apply(self, transition_context, *args, **kwargs):
+                 contexts=['readout_context', 'transition_context',
+                           'update_context', 'reset_context'])
+    def apply(self, transition_context, update_context, reset_context,
+              *args, **kwargs):
         kwargs['inputs'] += transition_context
+        kwargs['update_inputs'] += update_context
+        kwargs['reset_inputs'] += reset_context
         kwargs.pop('readout_context')
         return self.gated_recurrent.apply(*args, **kwargs)
 
     def get_dim(self, name):
-        if name == 'readout_context' or name == 'transition_context':
+        if name in ['readout_context', 'transition_context',
+                    'update_context', 'reset_context']:
             return self.dim
         return self.gated_recurrent.get_dim(name)
 
@@ -133,6 +144,8 @@ for brick in readout.merge.children:
 # Calculate the cost
 cost = sequence_generator.cost(outputs=y_t, mask=y_mask_t, states=decoder_init,
                                transition_context=transition_context,
+                               update_context=update_context,
+                               reset_context=reset_context,
                                readout_context=readout_context)
 cost = (cost * y_mask_t).sum() / y_mask_t.sum()
 cost.name = 'cost'
@@ -150,6 +163,10 @@ output_to_transition.weights_init = IsotropicGaussian(0.1)
 output_to_transition.biases_init = Constant(0)
 output_to_init.weights_init = IsotropicGaussian(0.1)
 output_to_init.biases_init = Constant(0)
+output_to_update.weights_init = IsotropicGaussian(0.1)
+output_to_update.biases_init = Constant(0)
+output_to_reset.weights_init = IsotropicGaussian(0.1)
+output_to_reset.biases_init = Constant(0)
 sequence_generator.weights_init = IsotropicGaussian(0.1)
 sequence_generator.biases_init = Constant(0)
 sequence_generator.push_initialization_config()
@@ -164,6 +181,8 @@ reset_linear.initialize()
 encoder.initialize()
 output_to_transition.initialize()
 output_to_init.initialize()
+output_to_update.initialize()
+output_to_reset.initialize()
 sequence_generator.initialize()
 
 # Set up training algorithm (standard SGD with gradient clipping)
