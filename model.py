@@ -4,7 +4,8 @@
 # TIP: Without CuDNN Theano seems to move part of the step clipping to CPU
 #      on my computer, which makes things very slow. CuDNN gives a 2x speedup
 #      in my case, so it's worth installing.
-
+import numpy
+import theano
 from theano import tensor
 
 from blocks.algorithms import (GradientDescent, StepClipping, AdaDelta,
@@ -19,6 +20,7 @@ from blocks.extensions.plot import Plot
 
 from blocks.bricks import (Tanh, Maxout, Linear, FeedforwardSequence, MLP,
                            Initializable)
+from blocks.bricks.base import application
 from blocks.bricks.lookup import LookupTable
 from blocks.bricks.recurrent import GatedRecurrent
 from blocks.bricks.sequence_generators import (
@@ -27,11 +29,23 @@ from blocks.bricks.sequence_generators import (
 
 from stream import masked_stream
 
+
+# Helper class
+class InitializableFeedforwardSequence(FeedforwardSequence, Initializable):
+    pass
+
 # Create Theano variables
 x = tensor.lmatrix('english')
 x_mask = tensor.matrix('english_mask')
 y = tensor.lmatrix('french')
 y_mask = tensor.matrix('french_mask')
+
+# Test values
+theano.config.compute_test_value = 'warn'
+x.tag.test_value = numpy.random.randint(10, size=(10, 10))
+y.tag.test_value = numpy.random.randint(10, size=(10, 10))
+x_mask.tag.test_value = numpy.random.rand(10, 10).astype('float32')
+y_mask.tag.test_value = numpy.random.rand(10, 10).astype('float32')
 
 # Time as first dimension
 x_t = x.dimshuffle(1, 0)[::-1]
@@ -39,7 +53,7 @@ x_mask_t = x_mask.T[::-1]
 y_t = y.dimshuffle(1, 0)
 y_mask_t = y_mask.T
 
-# Encoder
+# Inputs to the model (should use Fork here)
 lookup = LookupTable(30000, 100, name='english_embeddings')
 linear = Linear(input_dim=100, output_dim=1000)
 update_linear = Linear(input_dim=100, output_dim=1000, use_bias=False)
@@ -49,19 +63,54 @@ rnn_input = linear.apply(embeddings)
 update_rnn_input = update_linear.apply(embeddings)
 reset_rnn_input = reset_linear.apply(embeddings)
 
+# Encoder
 encoder = GatedRecurrent(Tanh(), None, 1000, name='encoder')
-
 last_hidden_state = encoder.apply(rnn_input, update_rnn_input,
                                   reset_rnn_input, mask=x_mask_t)[-1]
-context_transform = MLP(dims=[1000, 1000], activations=[Tanh()])
-context = context_transform.apply(last_hidden_state)
+
+# Links from the encoder to the decoder
+output_to_init = MLP(dims=[1000, 1000], activations=[Tanh()])
+output_to_transition = Linear(input_dim=1000, output_dim=1000)
+
+decoder_init = output_to_init.apply(last_hidden_state)
+transition_context = output_to_transition.apply(
+    last_hidden_state).dimshuffle('x', 0, 1)
+readout_context = last_hidden_state.dimshuffle('x', 0, 1)
 
 
-class InitializableFeedforwardSequence(FeedforwardSequence, Initializable):
-    pass
+# Decoder
+class GatedRecurrentWithContext(Initializable):
+    def __init__(self, *args, **kwargs):
+        self.gated_recurrent = GatedRecurrent(*args, **kwargs)
+        self.children = [self.gated_recurrent]
+
+    @application(states=['states'], outputs=['states'],
+                 contexts=['readout_context', 'transition_context'])
+    def apply(self, transition_context, *args, **kwargs):
+        kwargs['inputs'] += transition_context
+        kwargs.pop('readout_context')
+        return self.gated_recurrent.apply(*args, **kwargs)
+
+    def get_dim(self, name):
+        if name == 'readout_context' or name == 'transition_context':
+            return self.dim
+        return self.gated_recurrent.get_dim(name)
+
+    def __getattr__(self, name):
+        return getattr(self.gated_recurrent, name)
+
+    @apply.property('sequences')
+    def apply_inputs(self):
+        sequences = ['mask', 'inputs']
+        if self.use_update_gate:
+            sequences.append('update_inputs')
+        if self.use_reset_gate:
+            sequences.append('reset_inputs')
+        return sequences
+
 
 # The decoder
-readout = Readout(source_names=['states', 'feedback'],
+readout = Readout(source_names=['states', 'feedback', 'readout_context'],
                   readout_dim=30000,
                   emitter=SoftmaxEmitter(),
                   feedback_brick=LookupFeedback(30000, 100),
@@ -73,14 +122,18 @@ readout = Readout(source_names=['states', 'feedback'],
                   merged_dim=1000)
 
 sequence_generator = SequenceGenerator(
-    readout=readout,
-    transition=GatedRecurrent(Tanh(), dim=1000, name='decoder')
+    readout=readout, fork_inputs=['inputs', 'reset_inputs', 'update_inputs'],
+    transition=GatedRecurrentWithContext(Tanh(), dim=1000, name='decoder')
 )
+for brick in readout.merge.children:
+    brick.use_bias = True
+    break
 
 
 # Calculate the cost
-cost = sequence_generator.cost(outputs=y_t, mask=y_mask_t,
-                               states=context)
+cost = sequence_generator.cost(outputs=y_t, mask=y_mask_t, states=decoder_init,
+                               transition_context=transition_context,
+                               readout_context=readout_context)
 cost = (cost * y_mask_t).sum() / y_mask_t.sum()
 cost.name = 'cost'
 
@@ -89,10 +142,14 @@ lookup.weights_init = IsotropicGaussian(0.1)
 linear.weights_init = IsotropicGaussian(0.1)
 linear.biases_init = Constant(0)
 update_linear.weights_init = IsotropicGaussian(0.1)
+update_linear.biases_init = Constant(0)
 reset_linear.weights_init = IsotropicGaussian(0.1)
+reset_linear.biases_init = Constant(0)
 encoder.weights_init = Orthogonal()
-context_transform.weights_init = IsotropicGaussian(0.1)
-context_transform.biases_init = Constant(0)
+output_to_transition.weights_init = IsotropicGaussian(0.1)
+output_to_transition.biases_init = Constant(0)
+output_to_init.weights_init = IsotropicGaussian(0.1)
+output_to_init.biases_init = Constant(0)
 sequence_generator.weights_init = IsotropicGaussian(0.1)
 sequence_generator.biases_init = Constant(0)
 sequence_generator.push_initialization_config()
@@ -105,7 +162,8 @@ linear.initialize()
 update_linear.initialize()
 reset_linear.initialize()
 encoder.initialize()
-context_transform.initialize()
+output_to_transition.initialize()
+output_to_init.initialize()
 sequence_generator.initialize()
 
 # Set up training algorithm (standard SGD with gradient clipping)
