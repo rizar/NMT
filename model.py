@@ -68,17 +68,14 @@ last_hidden_state = encoder.apply(rnn_input, update_rnn_input,
 
 # Links from the encoder to the decoder
 output_to_init = MLP(dims=[1000, 1000], activations=[Tanh()])
-output_to_transition = Linear(input_dim=1000, output_dim=1000)
-output_to_update = Linear(input_dim=1000, output_dim=1000, use_bias=False)
-output_to_reset = Linear(input_dim=1000, output_dim=1000, use_bias=False)
+output_fork = Fork(output_names=['to_transition', 'to_update', 'to_reset'],
+                   input_dim=1000, output_dims=dict(to_transition=1000,
+                   to_update=1000, to_reset=1000))
+output_fork.children[0].use_bias = True
 
 decoder_init = output_to_init.apply(last_hidden_state)
-transition_context = output_to_transition.apply(
-    last_hidden_state).dimshuffle('x', 0, 1)
-update_context = output_to_update.apply(
-    last_hidden_state).dimshuffle('x', 0, 1)
-reset_context = output_to_reset.apply(
-    last_hidden_state).dimshuffle('x', 0, 1)
+transition_context, update_context, reset_context = \
+    [var.dimshuffle('x', 0, 1) for var in output_fork.apply(last_hidden_state)]
 readout_context = last_hidden_state.dimshuffle('x', 0, 1)
 
 
@@ -153,14 +150,10 @@ lookup.weights_init = IsotropicGaussian(0.1)
 fork.weights_init = IsotropicGaussian(0.1)
 fork.biases_init = Constant(0)
 encoder.weights_init = Orthogonal()
-output_to_transition.weights_init = IsotropicGaussian(0.1)
-output_to_transition.biases_init = Constant(0)
 output_to_init.weights_init = IsotropicGaussian(0.1)
 output_to_init.biases_init = Constant(0)
-output_to_update.weights_init = IsotropicGaussian(0.1)
-output_to_update.biases_init = Constant(0)
-output_to_reset.weights_init = IsotropicGaussian(0.1)
-output_to_reset.biases_init = Constant(0)
+output_fork.weights_init = IsotropicGaussian(0.1)
+output_fork.biases_init = Constant(0)
 sequence_generator.weights_init = IsotropicGaussian(0.1)
 sequence_generator.biases_init = Constant(0)
 sequence_generator.push_initialization_config()
@@ -171,10 +164,8 @@ readout.post_merge.biases_init = Constant(0)
 lookup.initialize()
 fork.initialize()
 encoder.initialize()
-output_to_transition.initialize()
 output_to_init.initialize()
-output_to_update.initialize()
-output_to_reset.initialize()
+output_fork.initialize()
 sequence_generator.initialize()
 
 # Set up training algorithm (standard SGD with gradient clipping)
