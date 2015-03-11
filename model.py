@@ -22,6 +22,7 @@ from blocks.bricks import (Tanh, Maxout, Linear, FeedforwardSequence, MLP,
                            Initializable)
 from blocks.bricks.base import application
 from blocks.bricks.lookup import LookupTable
+from blocks.bricks.parallel import Fork
 from blocks.bricks.recurrent import GatedRecurrent
 from blocks.bricks.sequence_generators import (
     LookupFeedback, Readout, SoftmaxEmitter, SequenceGenerator
@@ -53,15 +54,12 @@ x_mask_t = x_mask.T[::-1]
 y_t = y.dimshuffle(1, 0)
 y_mask_t = y_mask.T
 
-# Inputs to the model (should use Fork here)
+# Inputs to the model
 lookup = LookupTable(30000, 100, name='english_embeddings')
-linear = Linear(input_dim=100, output_dim=1000)
-update_linear = Linear(input_dim=100, output_dim=1000, use_bias=False)
-reset_linear = Linear(input_dim=100, output_dim=1000, use_bias=False)
-embeddings = lookup.apply(x_t)
-rnn_input = linear.apply(embeddings)
-update_rnn_input = update_linear.apply(embeddings)
-reset_rnn_input = reset_linear.apply(embeddings)
+fork = Fork(output_names=['linear', 'u_linear', 'r_linear'], input_dim=100,
+            output_dims=dict(linear=1000, u_linear=1000, r_linear=1000))
+fork.children[0].use_bias = True
+rnn_input, update_rnn_input, reset_rnn_input = fork.apply(lookup.apply(x_t))
 
 # Encoder
 encoder = GatedRecurrent(Tanh(), None, 1000, name='encoder')
@@ -152,12 +150,8 @@ cost.name = 'cost'
 
 # Initialization of the weights
 lookup.weights_init = IsotropicGaussian(0.1)
-linear.weights_init = IsotropicGaussian(0.1)
-linear.biases_init = Constant(0)
-update_linear.weights_init = IsotropicGaussian(0.1)
-update_linear.biases_init = Constant(0)
-reset_linear.weights_init = IsotropicGaussian(0.1)
-reset_linear.biases_init = Constant(0)
+fork.weights_init = IsotropicGaussian(0.1)
+fork.biases_init = Constant(0)
 encoder.weights_init = Orthogonal()
 output_to_transition.weights_init = IsotropicGaussian(0.1)
 output_to_transition.biases_init = Constant(0)
@@ -175,9 +169,7 @@ readout.post_merge.weights_init = IsotropicGaussian(0.1)
 readout.post_merge.biases_init = Constant(0)
 
 lookup.initialize()
-linear.initialize()
-update_linear.initialize()
-reset_linear.initialize()
+fork.initialize()
 encoder.initialize()
 output_to_transition.initialize()
 output_to_init.initialize()
