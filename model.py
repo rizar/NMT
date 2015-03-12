@@ -1,24 +1,26 @@
 # This is the original encoder-decoder model
 # It only works with Blocks PR #414 merged. It seems to train, but
-# I haven't monitored validation error, checkpointed or sampled sentences
+# I haven't sampled sentences yet
 # TIP: Without CuDNN Theano seems to move part of the step clipping to CPU
 #      on my computer, which makes things very slow. CuDNN gives a 2x speedup
 #      in my case, so it's worth installing.
 import numpy
 import theano
 from theano import tensor
+from toolz import merge
 
 from blocks.algorithms import (GradientDescent, StepClipping, AdaDelta,
                                CompositeRule)
 from blocks.main_loop import MainLoop
+from blocks.model import Model
 from blocks.graph import ComputationGraph
 from blocks.initialization import IsotropicGaussian, Orthogonal, Constant
 from blocks.extensions import Printing
 from blocks.extensions.monitoring import TrainingDataMonitoring
-from blocks.extensions.saveload import SerializeMainLoop
+from blocks.extensions.saveload import Checkpoint
 from blocks.extensions.plot import Plot
 
-from blocks.bricks import (Tanh, Maxout, Linear, FeedforwardSequence, MLP,
+from blocks.bricks import (Tanh, Maxout, Linear, FeedforwardSequence,
                            Initializable)
 from blocks.bricks.base import application
 from blocks.bricks.lookup import LookupTable
@@ -35,51 +37,7 @@ from stream import masked_stream
 class InitializableFeedforwardSequence(FeedforwardSequence, Initializable):
     pass
 
-# Create Theano variables
-x = tensor.lmatrix('english')
-x_mask = tensor.matrix('english_mask')
-y = tensor.lmatrix('french')
-y_mask = tensor.matrix('french_mask')
 
-# Test values
-theano.config.compute_test_value = 'warn'
-x.tag.test_value = numpy.random.randint(10, size=(10, 10))
-y.tag.test_value = numpy.random.randint(10, size=(10, 10))
-x_mask.tag.test_value = numpy.random.rand(10, 10).astype('float32')
-y_mask.tag.test_value = numpy.random.rand(10, 10).astype('float32')
-
-# Time as first dimension
-x_t = x.dimshuffle(1, 0)[::-1]
-x_mask_t = x_mask.T[::-1]
-y_t = y.dimshuffle(1, 0)
-y_mask_t = y_mask.T
-
-# Inputs to the model
-lookup = LookupTable(30000, 100, name='english_embeddings')
-fork = Fork(output_names=['linear', 'u_linear', 'r_linear'], input_dim=100,
-            output_dims=dict(linear=1000, u_linear=1000, r_linear=1000))
-fork.children[0].use_bias = True
-rnn_input, update_rnn_input, reset_rnn_input = fork.apply(lookup.apply(x_t))
-
-# Encoder
-encoder = GatedRecurrent(Tanh(), None, 1000, name='encoder')
-last_hidden_state = encoder.apply(rnn_input, update_rnn_input,
-                                  reset_rnn_input, mask=x_mask_t)[-1]
-
-# Links from the encoder to the decoder
-output_to_init = MLP(dims=[1000, 1000], activations=[Tanh()])
-output_fork = Fork(output_names=['to_transition', 'to_update', 'to_reset'],
-                   input_dim=1000, output_dims=dict(to_transition=1000,
-                   to_update=1000, to_reset=1000))
-output_fork.children[0].use_bias = True
-
-decoder_init = output_to_init.apply(last_hidden_state)
-transition_context, update_context, reset_context = \
-    [var.dimshuffle('x', 0, 1) for var in output_fork.apply(last_hidden_state)]
-readout_context = last_hidden_state.dimshuffle('x', 0, 1)
-
-
-# Decoder
 class GatedRecurrentWithContext(Initializable):
     def __init__(self, *args, **kwargs):
         self.gated_recurrent = GatedRecurrent(*args, **kwargs)
@@ -93,6 +51,7 @@ class GatedRecurrentWithContext(Initializable):
         kwargs['inputs'] += transition_context
         kwargs['update_inputs'] += update_context
         kwargs['reset_inputs'] += reset_context
+        # readout_context was only added for the Readout brick, discard it
         kwargs.pop('readout_context')
         return self.gated_recurrent.apply(*args, **kwargs)
 
@@ -115,75 +74,153 @@ class GatedRecurrentWithContext(Initializable):
         return sequences
 
 
-# The decoder
-readout = Readout(source_names=['states', 'feedback', 'readout_context'],
-                  readout_dim=30000,
-                  emitter=SoftmaxEmitter(),
-                  feedback_brick=LookupFeedback(30000, 100),
-                  post_merge=InitializableFeedforwardSequence(
-                      [Maxout(num_pieces=2).apply,
-                       Linear(input_dim=500, output_dim=100,
-                              use_bias=False).apply,
-                       Linear(input_dim=100).apply]),
-                  merged_dim=1000)
+class Encoder(Initializable):
+    def __init__(self, vocab_size, embedding_dim, state_dim, reverse=True,
+                 **kwargs):
+        super(Encoder, self).__init__(**kwargs)
+        self.vocab_size = vocab_size
+        self.embedding_dim = embedding_dim
+        self.state_dim = state_dim
+        self.reverse = reverse
 
-sequence_generator = SequenceGenerator(
-    readout=readout, fork_inputs=['inputs', 'reset_inputs', 'update_inputs'],
-    transition=GatedRecurrentWithContext(Tanh(), dim=1000, name='decoder')
-)
-for brick in readout.merge.children:
-    brick.use_bias = True
-    break
+        self.lookup = LookupTable(name='embeddings')
+        self.transition = GatedRecurrent(Tanh(), name='encoder_transition')
+        self.fork = Fork(self.transition.apply.sequences, prototype=Linear())
+
+        self.children = [self.lookup, self.transition, self.fork]
+
+    def _push_allocation_config(self):
+        self.lookup.length = self.vocab_size
+        self.lookup.dim = self.embedding_dim
+        self.transition.dim = self.state_dim
+        self.fork.input_dim = self.embedding_dim
+        self.fork.output_dims = [self.state_dim
+                                 for _ in self.fork.output_names]
+
+    @application(inputs=['source_sentence', 'source_sentence_mask'],
+                 outputs=['representation'])
+    def apply(self, source_sentence, source_sentence_mask):
+        # Time as first dimension
+        source_sentence = source_sentence.dimshuffle(1, 0)
+        if self.reverse:
+            source_sentence = source_sentence[::-1]
+            source_sentence_mask = source_sentence_mask.T[::-1]
+
+        embeddings = self.lookup.apply(source_sentence)
+        representation = self.transition.apply(**merge(
+            self.fork.apply(embeddings, as_dict=True),
+            {'mask': source_sentence_mask}
+        ))
+        return representation[-1]
 
 
-# Calculate the cost
-cost = sequence_generator.cost(outputs=y_t, mask=y_mask_t, states=decoder_init,
-                               transition_context=transition_context,
-                               update_context=update_context,
-                               reset_context=reset_context,
-                               readout_context=readout_context)
-cost = (cost * y_mask_t).sum() / y_mask_t.sum()
-cost.name = 'cost'
+class Decoder(Initializable):
+    def __init__(self, vocab_size, embedding_dim, state_dim,
+                 representation_dim, **kwargs):
+        super(Decoder, self).__init__(**kwargs)
+        self.vocab_size = vocab_size
+        self.embedding_dim = embedding_dim
+        self.state_dim = state_dim
+        self.representation_dim = representation_dim
 
-# Initialization of the weights
-lookup.weights_init = IsotropicGaussian(0.1)
-fork.weights_init = IsotropicGaussian(0.1)
-fork.biases_init = Constant(0)
-encoder.weights_init = Orthogonal()
-output_to_init.weights_init = IsotropicGaussian(0.1)
-output_to_init.biases_init = Constant(0)
-output_fork.weights_init = IsotropicGaussian(0.1)
-output_fork.biases_init = Constant(0)
-sequence_generator.weights_init = IsotropicGaussian(0.1)
-sequence_generator.biases_init = Constant(0)
-sequence_generator.push_initialization_config()
-sequence_generator.transition.weights_init = Orthogonal()
-readout.post_merge.weights_init = IsotropicGaussian(0.1)
-readout.post_merge.biases_init = Constant(0)
+        readout = Readout(
+            source_names=['states', 'feedback', 'readout_context'],
+            readout_dim=self.vocab_size,
+            emitter=SoftmaxEmitter(),
+            feedback_brick=LookupFeedback(vocab_size, embedding_dim),
+            post_merge=InitializableFeedforwardSequence(
+                [Maxout(num_pieces=2).apply,
+                 Linear(input_dim=state_dim / 2, output_dim=100,
+                        use_bias=False).apply,
+                 Linear(input_dim=100).apply]),
+            merged_dim=1000)
 
-lookup.initialize()
-fork.initialize()
-encoder.initialize()
-output_to_init.initialize()
-output_fork.initialize()
-sequence_generator.initialize()
+        self.transition = GatedRecurrentWithContext(Tanh(), dim=state_dim,
+                                                    name='decoder')
+        self.fork = Fork(self.transition.apply.contexts +
+                         self.transition.apply.states, prototype=Linear())
 
-# Set up training algorithm (standard SGD with gradient clipping)
-cg = ComputationGraph(cost)
-algorithm = GradientDescent(
-    cost=cost, params=cg.parameters,
-    step_rule=CompositeRule([StepClipping(10), AdaDelta()])
-)
+        self.sequence_generator = SequenceGenerator(
+            readout=readout, transition=self.transition,
+            fork_inputs=[name for name in self.transition.apply.sequences
+                         if name != 'mask'],
+        )
 
-# Train!
-main_loop = MainLoop(
-    algorithm=algorithm,
-    data_stream=masked_stream,
-    extensions=[
-        TrainingDataMonitoring([cost], after_every_batch=True),
-        Plot('En-Fr', channels=[['cost']], after_every_batch=True),
-        Printing(after_every_batch=True),
-        SerializeMainLoop('model.pkl', every_n_batches=2048)
-    ]
-)
-main_loop.run()
+        self.children = [self.fork, self.sequence_generator]
+
+    def _push_allocation_config(self):
+        self.fork.input_dim = self.representation_dim
+        self.fork.output_dims = [self.state_dim
+                                 for _ in self.fork.output_names]
+
+    @application(inputs=['representation', 'target_sentence_mask',
+                         'target_sentence'], outputs=['cost'])
+    def cost(self, representation, target_sentence, target_sentence_mask):
+        target_sentence = target_sentence.dimshuffle(1, 0)
+        target_sentence_mask = target_sentence_mask.T
+
+        # The initial state and contexts, all functions of the representation
+        contexts = {key: value.dimshuffle('x', 0, 1)
+                    if key not in self.transition.apply.states else value
+                    for key, value
+                    in self.fork.apply(representation, as_dict=True).items()}
+        cost = self.sequence_generator.cost(**merge(
+            contexts, {'mask': target_sentence_mask,
+                       'outputs': target_sentence})
+        )
+
+        return (cost * target_sentence_mask).sum() / target_sentence_mask.sum()
+
+
+if __name__ == "__main__":
+    # Create Theano variables
+    source_sentence = tensor.lmatrix('english')
+    source_sentence_mask = tensor.matrix('english_mask')
+    target_sentence = tensor.lmatrix('french')
+    target_sentence_mask = tensor.matrix('french_mask')
+
+    # Test values
+    theano.config.compute_test_value = 'warn'
+    source_sentence.tag.test_value = numpy.random.randint(10, size=(10, 10))
+    target_sentence.tag.test_value = numpy.random.randint(10, size=(10, 10))
+    source_sentence_mask.tag.test_value = \
+        numpy.random.rand(10, 10).astype('float32')
+    target_sentence_mask.tag.test_value = \
+        numpy.random.rand(10, 10).astype('float32')
+
+    # Construct model
+    encoder = Encoder(30000, 100, 1000)
+    decoder = Decoder(30000, 100, 1000, 1000)
+    cost = decoder.cost(encoder.apply(source_sentence, source_sentence_mask),
+                        target_sentence, target_sentence_mask)
+
+    # Initialize model
+    encoder.weights_init = decoder.weights_init = IsotropicGaussian(0.1)
+    encoder.biases_init = decoder.biases_init = Constant(0)
+    encoder.push_initialization_config()
+    decoder.push_initialization_config()
+    encoder.transition.weights_init = Orthogonal()
+    decoder.transition.weights_init = Orthogonal()
+    encoder.initialize()
+    decoder.initialize()
+
+    # Set up training algorithm
+    cg = ComputationGraph(cost)
+    algorithm = GradientDescent(
+        cost=cost, params=cg.parameters,
+        step_rule=CompositeRule([StepClipping(10), AdaDelta()])
+    )
+
+    # Train!
+    main_loop = MainLoop(
+        model=Model(cost),
+        algorithm=algorithm,
+        data_stream=masked_stream,
+        extensions=[
+            TrainingDataMonitoring([cost], after_every_batch=True),
+            Plot('En-Fr', channels=[['cost']], after_every_batch=True),
+            Printing(after_every_batch=True),
+            Checkpoint('model.pkl', every_n_batches=2048)
+        ]
+    )
+    main_loop.run()
