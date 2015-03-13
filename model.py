@@ -106,9 +106,10 @@ class Encoder(Initializable):
     def apply(self, source_sentence, source_sentence_mask):
         # Time as first dimension
         source_sentence = source_sentence.dimshuffle(1, 0)
+        source_sentence_mask = source_sentence_mask.T
         if self.reverse:
             source_sentence = source_sentence[::-1]
-            source_sentence_mask = source_sentence_mask.T[::-1]
+            source_sentence_mask = source_sentence_mask[::-1]
 
         embeddings = self.lookup.apply(source_sentence)
         representation = self.transition.apply(**merge(
