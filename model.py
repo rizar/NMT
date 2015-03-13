@@ -63,6 +63,8 @@ class GatedRecurrentWithContext(Initializable):
         return self.gated_recurrent.get_dim(name)
 
     def __getattr__(self, name):
+        if name == 'gated_recurrent':
+            raise AttributeError
         return getattr(self.gated_recurrent, name)
 
     @apply.property('sequences')
@@ -233,7 +235,8 @@ if __name__ == "__main__":
         data_stream=masked_stream,
         extensions=[
             TrainingDataMonitoring([cost], after_every_batch=True),
-            Plot('En-Fr', channels=[['cost']], after_every_batch=True),
+            Plot('En-Fr', channels=[['decoder_cost_cost']],
+                 after_every_batch=True),
             Printing(after_every_batch=True),
             Checkpoint('model.pkl', every_n_batches=2048)
         ]
