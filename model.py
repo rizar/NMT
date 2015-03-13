@@ -11,7 +11,7 @@ from theano import tensor
 from toolz import merge
 
 from blocks.algorithms import (GradientDescent, StepClipping, AdaDelta,
-                               CompositeRule)
+                               Scale, CompositeRule)
 from blocks.main_loop import MainLoop
 from blocks.model import Model
 from blocks.graph import ComputationGraph
@@ -78,7 +78,7 @@ class GatedRecurrentWithContext(Initializable):
 
 
 class Encoder(Initializable):
-    def __init__(self, vocab_size, embedding_dim, state_dim, reverse=True,
+    def __init__(self, vocab_size, embedding_dim, state_dim, reverse=False,
                  **kwargs):
         super(Encoder, self).__init__(**kwargs)
         self.vocab_size = vocab_size
@@ -136,9 +136,9 @@ class Decoder(Initializable):
             post_merge=InitializableFeedforwardSequence(
                 [Bias(dim=1000).apply,
                  Maxout(num_pieces=2).apply,
-                 Linear(input_dim=state_dim / 2, output_dim=100,
+                 Linear(input_dim=state_dim / 2, output_dim=620,
                         use_bias=False).apply,
-                 Linear(input_dim=100).apply]),
+                 Linear(input_dim=620).apply]),
             merged_dim=1000)
 
         self.transition = GatedRecurrentWithContext(Tanh(), dim=state_dim,
@@ -179,8 +179,7 @@ class Decoder(Initializable):
                        'outputs': target_sentence,
                        'readout_context': representation.dimshuffle('x', 0, 1)}
         ))
-
-        return (cost * target_sentence_mask).sum() / target_sentence_mask.sum()
+        return (cost * target_sentence_mask).sum()
 
 
 if __name__ == "__main__":
@@ -200,8 +199,8 @@ if __name__ == "__main__":
         numpy.random.rand(10, 10).astype('float32')
 
     # Construct model
-    encoder = Encoder(30000, 100, 1000)
-    decoder = Decoder(30000, 100, 1000, 1000)
+    encoder = Encoder(30001, 620, 1000)
+    decoder = Decoder(30001, 620, 1000, 1000)
     cost = decoder.cost(encoder.apply(source_sentence, source_sentence_mask),
                         target_sentence, target_sentence_mask)
 
@@ -222,11 +221,58 @@ if __name__ == "__main__":
     print('Parameter shapes')
     for shape, count in Counter(shapes).most_common():
         print('    {:15}: {}'.format(shape, count))
+    
+    # Load parameters from pre-trained model
+    model_name = '/data/lisatmp3/jeasebas/nmt/encdec_600/rnned-long_model0.npz'
+    
+    tmp_file = numpy.load(model_name)
+    model = dict(tmp_file)
+    tmp_file.close()
+
+    # Lookup
+    encoder.children[0].params[0].set_value(model['W_0_enc_approx_embdr'] + model['b_0_enc_approx_embdr'])
+    # Transition
+    encoder.children[1].params[0].set_value(model['W_enc_transition_0'])
+    encoder.children[1].params[1].set_value(model['G_enc_transition_0'])
+    encoder.children[1].params[2].set_value(model['R_enc_transition_0'])
+    # Input
+    encoder.children[2].children[0].params[0].set_value(model['W_0_enc_input_embdr_0'])
+    encoder.children[2].children[0].params[1].set_value(model['b_0_enc_input_embdr_0'])
+    encoder.children[2].children[1].params[0].set_value(model['W_0_enc_update_embdr_0'])
+    encoder.children[2].children[2].params[0].set_value(model['W_0_enc_reset_embdr_0'])
+    # No biases for update and reset gates in GH. Leave them at 0.
+    
+    decoder.children[0].children[0].params[0].set_value(model['W_0_dec_dec_inputter_0']) # fork_transition_context
+    decoder.children[0].children[0].params[1].set_value(model['b_0_dec_input_embdr_0'])
+    decoder.children[0].children[1].params[0].set_value(model['W_0_dec_dec_updater_0']) # fork_update_context
+    decoder.children[0].children[2].params[0].set_value(model['W_0_dec_dec_reseter_0']) # fork_reset_context
+    # Other biases are not in GH
+    decoder.children[0].children[3].params[0].set_value(model['W_0_dec_initializer_0']) # ??? #fork_states 
+    decoder.children[0].children[3].params[1].set_value(model['b_0_dec_initializer_0'])
+    
+    decoder.children[1].children[0].children[1].children[0].params[0].set_value(model['W_0_dec_approx_embdr'] + model['b_0_dec_approx_embdr']) # lookup table
+    decoder.children[1].children[0].children[2].children[0].params[0].set_value(model['W_0_dec_hid_readout_0']) # transform_states
+    decoder.children[1].children[0].children[2].children[1].params[0].set_value(model['W_0_dec_prev_readout_0']) # transform_feedback
+    decoder.children[1].children[0].children[2].children[2].params[0].set_value(model['W_0_dec_repr_readout']) # transform_readout_context
+    # Is bias at decoder.children[1].children[0].children[3].children[0]?
+    
+    decoder.children[1].children[1].children[0].params[0].set_value(model['W_0_dec_input_embdr_0']) # fork_inputs
+    decoder.children[1].children[1].children[1].params[0].set_value(model['W_0_dec_update_embdr_0']) # fork_update_inputs
+    decoder.children[1].children[1].children[2].params[0].set_value(model['W_0_dec_reset_embdr_0']) # fork_reset_inputs
+    
+    decoder.children[1].children[2].children[0].children[0].params[0].set_value(model['W_dec_transition_0'])
+    decoder.children[1].children[2].children[0].children[0].params[1].set_value(model['G_dec_transition_0'])
+    decoder.children[1].children[2].children[0].children[0].params[2].set_value(model['R_dec_transition_0'])
+
+    decoder.children[1].children[0].children[3].children[0].params[0].set_value(model['b_0_dec_hid_readout_0']) # Bias brick
+    decoder.children[1].children[0].children[3].children[2].params[0].set_value(model['W1_dec_deep_softmax'])
+    decoder.children[1].children[0].children[3].children[3].params[0].set_value(model['W2_dec_deep_softmax'])
+    decoder.children[1].children[0].children[3].children[3].params[1].set_value(model['b_dec_deep_softmax'])
 
     # Set up training algorithm
     algorithm = GradientDescent(
         cost=cost, params=cg.parameters,
-        step_rule=CompositeRule([StepClipping(10), AdaDelta()])
+        step_rule=CompositeRule([StepClipping(10), Scale(0.0)])
     )
 
     # Train!
@@ -236,8 +282,8 @@ if __name__ == "__main__":
         data_stream=masked_stream,
         extensions=[
             TrainingDataMonitoring([cost], after_every_batch=True),
-            Plot('En-Fr', channels=[['decoder_cost_cost']],
-                 after_every_batch=True),
+            #Plot('En-Fr', channels=[['decoder_cost_cost']],
+            #     after_every_batch=True),
             Printing(after_every_batch=True),
             Checkpoint('model.pkl', every_n_batches=2048)
         ]
