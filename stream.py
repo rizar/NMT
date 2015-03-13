@@ -8,33 +8,42 @@
 import cPickle
 import os
 
+from picklable_itertools import chain, izip, imap, repeat
+
 from fuel import config
 from fuel.datasets import TextFile
 from fuel.schemes import ConstantScheme
-from fuel.transformers import Merge, Batch, Filter, Mapping, SortMapping, Cache, Padding
+from fuel.transformers import Merge, Batch, Filter, Padding
 
 en_vocab, fr_vocab = [os.path.join(config.data_path, 'mt',
-                                   '{}_vocab_30000.pkl'.format(lang))
+                                   '{}_vocab_clean_30000.pkl'.format(lang))
                       for lang in ['en', 'fr']]
 
-en_sources = ['commoncrawl.fr-en.en',
-              'news-commentary-v10.fr-en.en',
-              'giga-fren.release2.en',
-              'training/europarl-v7.fr-en.en',
-              'un/undoc.2000.fr-en.en']
-en_files = [os.path.join(config.data_path, 'mt', source)
-            for source in en_sources]
+sources = ['commoncrawl.fr-en',
+           'news-commentary-v10.fr-en',
+           'giga-fren.release2',
+           'training/europarl-v7.fr-en',
+           'un/undoc.2000.fr-en']
 
-fr_sources = ['commoncrawl.fr-en.fr',
-              'news-commentary-v10.fr-en.fr',
-              'giga-fren.release2.fr',
-              'training/europarl-v7.fr-en.fr',
-              'un/undoc.2000.fr-en.fr']
-fr_files = [os.path.join(config.data_path, 'mt', source)
-            for source in fr_sources]
+en_files = [os.path.join(config.data_path, 'mt',
+                         source + '.token.true.clean.en')
+            for source in sources]
 
-en_dataset = TextFile(en_files, cPickle.load(open(en_vocab)), None, None)
-fr_dataset = TextFile(fr_files, cPickle.load(open(fr_vocab)), None)
+fr_files = [os.path.join(config.data_path, 'mt',
+                         source + '.token.true.clean.fr')
+            for source in sources]
+
+
+class CycleTextFile(TextFile):
+    """This dataset cycles through the text files, reading a sentence
+    from each.
+    """
+    def open(self):
+        return chain.from_iterable(izip(*[chain.from_iterable(
+            imap(open, repeat(f))) for f in self.files]))
+
+en_dataset = CycleTextFile(en_files, cPickle.load(open(en_vocab)), None)
+fr_dataset = CycleTextFile(fr_files, cPickle.load(open(fr_vocab)), None)
 
 stream = Merge([en_dataset.get_example_stream(),
                 fr_dataset.get_example_stream()],
