@@ -4,6 +4,7 @@
 # TIP: Without CuDNN Theano seems to move part of the step clipping to CPU
 #      on my computer, which makes things very slow. CuDNN gives a 2x speedup
 #      in my case, so it's worth installing.
+from collections import Counter
 import numpy
 import theano
 from theano import tensor
@@ -21,7 +22,7 @@ from blocks.extensions.saveload import Checkpoint
 from blocks.extensions.plot import Plot
 
 from blocks.bricks import (Tanh, Maxout, Linear, FeedforwardSequence,
-                           Initializable)
+                           Bias, Initializable)
 from blocks.bricks.base import application
 from blocks.bricks.lookup import LookupTable
 from blocks.bricks.parallel import Fork
@@ -85,7 +86,8 @@ class Encoder(Initializable):
 
         self.lookup = LookupTable(name='embeddings')
         self.transition = GatedRecurrent(Tanh(), name='encoder_transition')
-        self.fork = Fork(self.transition.apply.sequences, prototype=Linear())
+        self.fork = Fork([name for name in self.transition.apply.sequences
+                          if name != 'mask'], prototype=Linear())
 
         self.children = [self.lookup, self.transition, self.fork]
 
@@ -129,7 +131,8 @@ class Decoder(Initializable):
             emitter=SoftmaxEmitter(),
             feedback_brick=LookupFeedback(vocab_size, embedding_dim),
             post_merge=InitializableFeedforwardSequence(
-                [Maxout(num_pieces=2).apply,
+                [Bias(dim=1000).apply,
+                 Maxout(num_pieces=2).apply,
                  Linear(input_dim=state_dim / 2, output_dim=100,
                         use_bias=False).apply,
                  Linear(input_dim=100).apply]),
@@ -137,8 +140,12 @@ class Decoder(Initializable):
 
         self.transition = GatedRecurrentWithContext(Tanh(), dim=state_dim,
                                                     name='decoder')
-        self.fork = Fork(self.transition.apply.contexts +
-                         self.transition.apply.states, prototype=Linear())
+        # Readout will apply the linear transformation to 'readout_context'
+        # with a Merge brick, so no need to fork it here
+        self.fork = Fork([name for name in
+                          self.transition.apply.contexts +
+                          self.transition.apply.states
+                          if name != 'readout_context'], prototype=Linear())
 
         self.sequence_generator = SequenceGenerator(
             readout=readout, transition=self.transition,
@@ -166,8 +173,9 @@ class Decoder(Initializable):
                     in self.fork.apply(representation, as_dict=True).items()}
         cost = self.sequence_generator.cost(**merge(
             contexts, {'mask': target_sentence_mask,
-                       'outputs': target_sentence})
-        )
+                       'outputs': target_sentence,
+                       'readout_context': representation.dimshuffle('x', 0, 1)}
+        ))
 
         return (cost * target_sentence_mask).sum() / target_sentence_mask.sum()
 
@@ -204,8 +212,15 @@ if __name__ == "__main__":
     encoder.initialize()
     decoder.initialize()
 
-    # Set up training algorithm
     cg = ComputationGraph(cost)
+
+    # Print shapes
+    shapes = [param.get_value().shape for param in cg.parameters]
+    print('Parameter shapes')
+    for shape, count in Counter(shapes).most_common():
+        print('    {:15}: {}'.format(shape, count))
+
+    # Set up training algorithm
     algorithm = GradientDescent(
         cost=cost, params=cg.parameters,
         step_rule=CompositeRule([StepClipping(10), AdaDelta()])
