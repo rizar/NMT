@@ -223,54 +223,52 @@ if __name__ == "__main__":
         print('    {:15}: {}'.format(shape, count))
 
     model = Model(cost)
-    model.get_params()
-    
+    param_dict = model.get_params()
+
     # Load parameters from pre-trained model
-    model_name = '/data/lisatmp3/jeasebas/nmt/encdec_600/rnned-long_model0.npz'
-    
-    tmp_file = numpy.load(model_name)
-    model = dict(tmp_file)
+    gh_model_name = '/data/lisatmp3/jeasebas/nmt/encdec_600/rnned-long_model0.npz'
+
+    tmp_file = numpy.load(gh_model_name)
+    gh_model = dict(tmp_file)
     tmp_file.close()
 
-    param_dict = Model(cost).get_params()
+    param_dict['/encoder/embeddings.W'].set_value(gh_model['W_0_enc_approx_embdr'] + gh_model['b_0_enc_approx_embdr'])
 
-    param_dict['/encoder/embeddings.W'].set_value(model['W_0_enc_approx_embdr'] + model['b_0_enc_approx_embdr'])
+    param_dict['/encoder/encoder_transition.state_to_state'].set_value(gh_model['W_enc_transition_0'])
+    param_dict['/encoder/encoder_transition.state_to_update'].set_value(gh_model['G_enc_transition_0'])
+    param_dict['/encoder/encoder_transition.state_to_reset'].set_value(gh_model['R_enc_transition_0'])
 
-    param_dict['/encoder/encoder_transition.state_to_state'].set_value(model['W_enc_transition_0'])
-    param_dict['/encoder/encoder_transition.state_to_update'].set_value(model['G_enc_transition_0'])
-    param_dict['/encoder/encoder_transition.state_to_reset'].set_value(model['R_enc_transition_0'])
+    param_dict['/encoder/fork/fork_inputs.W'].set_value(gh_model['W_0_enc_input_embdr_0'])
+    param_dict['/encoder/fork/fork_inputs.b'].set_value(gh_model['b_0_enc_input_embdr_0'])
+    param_dict['/encoder/fork/fork_update_inputs.W'].set_value(gh_model['W_0_enc_update_embdr_0'])
+    param_dict['/encoder/fork/fork_reset_inputs.W'].set_value(gh_model['W_0_enc_reset_embdr_0'])
 
-    param_dict['/encoder/fork/fork_inputs.W'].set_value(model['W_0_enc_input_embdr_0'])
-    param_dict['/encoder/fork/fork_inputs.b'].set_value(model['b_0_enc_input_embdr_0'])
-    param_dict['/encoder/fork/fork_update_inputs.W'].set_value(model['W_0_enc_update_embdr_0'])
-    param_dict['/encoder/fork/fork_reset_inputs.W'].set_value(model['W_0_enc_reset_embdr_0'])
-    
-    param_dict['/decoder/fork/fork_transition_context.W'].set_value(model['W_0_dec_dec_inputter_0'])
-    param_dict['/decoder/fork/fork_transition_context.b'].set_value(model['b_0_dec_input_embdr_0'])
-    param_dict['/decoder/fork/fork_update_context.W'].set_value(model['W_0_dec_dec_updater_0'])
-    param_dict['/decoder/fork/fork_reset_context.W'].set_value(model['W_0_dec_dec_reseter_0'])
+    param_dict['/decoder/fork/fork_transition_context.W'].set_value(gh_model['W_0_dec_dec_inputter_0'])
+    param_dict['/decoder/fork/fork_transition_context.b'].set_value(gh_model['b_0_dec_input_embdr_0'])
+    param_dict['/decoder/fork/fork_update_context.W'].set_value(gh_model['W_0_dec_dec_updater_0'])
+    param_dict['/decoder/fork/fork_reset_context.W'].set_value(gh_model['W_0_dec_dec_reseter_0'])
 
-    param_dict['/decoder/fork/fork_states.W'].set_value(model['W_0_dec_initializer_0'])
-    param_dict['/decoder/fork/fork_states.b'].set_value(model['b_0_dec_initializer_0'])
-    
-    param_dict['/decoder/sequencegenerator/readout/lookupfeedback/lookuptable.W'].set_value(model['W_0_dec_approx_embdr'] + model['b_0_dec_approx_embdr'])
+    param_dict['/decoder/fork/fork_states.W'].set_value(gh_model['W_0_dec_initializer_0'])
+    param_dict['/decoder/fork/fork_states.b'].set_value(gh_model['b_0_dec_initializer_0'])
 
-    param_dict['/decoder/sequencegenerator/readout/merge/transform_states.W'].set_value(model['W_0_dec_hid_readout_0'])
-    param_dict['/decoder/sequencegenerator/readout/merge/transform_feedback.W'].set_value(model['W_0_dec_prev_readout_0'])
-    param_dict['/decoder/sequencegenerator/readout/merge/transform_readout_context.W'].set_value(model['W_0_dec_repr_readout'])
-    
-    param_dict['/decoder/sequencegenerator/fork/fork_inputs.W'].set_value(model['W_0_dec_input_embdr_0'])
-    param_dict['/decoder/sequencegenerator/fork/fork_update_inputs.W'].set_value(model['W_0_dec_update_embdr_0'])
-    param_dict['/decoder/sequencegenerator/fork/fork_reset_inputs.W'].set_value(model['W_0_dec_reset_embdr_0'])
-    
-    param_dict['/decoder/sequencegenerator/with_fake_attention/decoder/decoder.state_to_state'].set_value(model['W_dec_transition_0'])
-    param_dict['/decoder/sequencegenerator/with_fake_attention/decoder/decoder.state_to_update'].set_value(model['G_dec_transition_0'])
-    param_dict['/decoder/sequencegenerator/with_fake_attention/decoder/decoder.state_to_reset'].set_value(model['R_dec_transition_0'])
+    param_dict['/decoder/sequencegenerator/readout/lookupfeedback/lookuptable.W'].set_value(gh_model['W_0_dec_approx_embdr'] + gh_model['b_0_dec_approx_embdr'])
 
-    param_dict['/decoder/sequencegenerator/readout/initializablefeedforwardsequence/bias.b'].set_value(model['b_0_dec_hid_readout_0'])
-    param_dict['W'].set_value(model['W1_dec_deep_softmax'])
-    param_dict['/decoder/sequencegenerator/readout/initializablefeedforwardsequence/linear.W'].set_value(model['W2_dec_deep_softmax'])
-    param_dict['/decoder/sequencegenerator/readout/initializablefeedforwardsequence/linear.b'].set_value(model['b_dec_deep_softmax'])
+    param_dict['/decoder/sequencegenerator/readout/merge/transform_states.W'].set_value(gh_model['W_0_dec_hid_readout_0'])
+    param_dict['/decoder/sequencegenerator/readout/merge/transform_feedback.W'].set_value(gh_model['W_0_dec_prev_readout_0'])
+    param_dict['/decoder/sequencegenerator/readout/merge/transform_readout_context.W'].set_value(gh_model['W_0_dec_repr_readout'])
+
+    param_dict['/decoder/sequencegenerator/fork/fork_inputs.W'].set_value(gh_model['W_0_dec_input_embdr_0'])
+    param_dict['/decoder/sequencegenerator/fork/fork_update_inputs.W'].set_value(gh_model['W_0_dec_update_embdr_0'])
+    param_dict['/decoder/sequencegenerator/fork/fork_reset_inputs.W'].set_value(gh_model['W_0_dec_reset_embdr_0'])
+
+    param_dict['/decoder/sequencegenerator/with_fake_attention/decoder/decoder.state_to_state'].set_value(gh_model['W_dec_transition_0'])
+    param_dict['/decoder/sequencegenerator/with_fake_attention/decoder/decoder.state_to_update'].set_value(gh_model['G_dec_transition_0'])
+    param_dict['/decoder/sequencegenerator/with_fake_attention/decoder/decoder.state_to_reset'].set_value(gh_model['R_dec_transition_0'])
+
+    param_dict['/decoder/sequencegenerator/readout/initializablefeedforwardsequence/bias.b'].set_value(gh_model['b_0_dec_hid_readout_0'])
+    param_dict['W'].set_value(gh_model['W1_dec_deep_softmax'])
+    param_dict['/decoder/sequencegenerator/readout/initializablefeedforwardsequence/linear.W'].set_value(gh_model['W2_dec_deep_softmax'])
+    param_dict['/decoder/sequencegenerator/readout/initializablefeedforwardsequence/linear.b'].set_value(gh_model['b_dec_deep_softmax'])
 
     # Set up training algorithm
     algorithm = GradientDescent(
@@ -278,9 +276,10 @@ if __name__ == "__main__":
         step_rule=CompositeRule([StepClipping(10), Scale(0.0)])
     )
 
+
     # Train!
     main_loop = MainLoop(
-        model=Model(cost),
+        model=model,
         algorithm=algorithm,
         data_stream=masked_stream,
         extensions=[
