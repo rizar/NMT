@@ -189,14 +189,18 @@ if __name__ == "__main__":
     target_sentence = tensor.lmatrix('french')
     target_sentence_mask = tensor.matrix('french_mask')
 
+    epoch_iterator = masked_stream.get_epoch_iterator(as_dict=True)
+    batch = next(epoch_iterator)
+
     # Test values
     theano.config.compute_test_value = 'warn'
-    source_sentence.tag.test_value = numpy.random.randint(10, size=(10, 10))
-    target_sentence.tag.test_value = numpy.random.randint(10, size=(10, 10))
+
+    source_sentence.tag.test_value = batch['english']
+    target_sentence.tag.test_value = batch['french']
     source_sentence_mask.tag.test_value = \
-        numpy.random.rand(10, 10).astype('float32')
+        batch['english_mask']
     target_sentence_mask.tag.test_value = \
-        numpy.random.rand(10, 10).astype('float32')
+        batch['french_mask']
 
     # Construct model
     encoder = Encoder(30001, 620, 1000)
@@ -270,25 +274,7 @@ if __name__ == "__main__":
     param_dict['/decoder/sequencegenerator/readout/initializablefeedforwardsequence/linear.W'].set_value(gh_model['W2_dec_deep_softmax'])
     param_dict['/decoder/sequencegenerator/readout/initializablefeedforwardsequence/linear.b'].set_value(gh_model['b_dec_deep_softmax'])
 
-    # Set up training algorithm
-    algorithm = GradientDescent(
-        cost=cost, params=cg.parameters,
-        step_rule=CompositeRule([StepClipping(10), Scale(0.0)])
-    )
+    f = theano.function([target_sentence_mask, target_sentence, source_sentence_mask, source_sentence], cost)
 
-
-    # Train!
-    main_loop = MainLoop(
-        model=model,
-        algorithm=algorithm,
-        data_stream=masked_stream,
-        extensions=[
-            TrainingDataMonitoring([cost], after_every_batch=True),
-            #Plot('En-Fr', channels=[['decoder_cost_cost']],
-            #     after_every_batch=True),
-            Printing(after_every_batch=True),
-            Checkpoint('model.pkl', every_n_batches=2048),
-            FinishAfter(after_n_epochs=1)
-        ]
-    )
-    main_loop.run()
+    cur_cost = f(batch['french_mask'], batch['french'], batch['english_mask'], batch['english'])
+    print cur_cost
