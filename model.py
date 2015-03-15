@@ -16,7 +16,7 @@ from blocks.main_loop import MainLoop
 from blocks.model import Model
 from blocks.graph import ComputationGraph
 from blocks.initialization import IsotropicGaussian, Orthogonal, Constant
-from blocks.extensions import Printing
+from blocks.extensions import Printing, FinishAfter
 from blocks.extensions.monitoring import TrainingDataMonitoring
 from blocks.extensions.saveload import Checkpoint
 from blocks.extensions.plot import Plot
@@ -221,6 +221,9 @@ if __name__ == "__main__":
     print('Parameter shapes')
     for shape, count in Counter(shapes).most_common():
         print('    {:15}: {}'.format(shape, count))
+
+    model = Model(cost)
+    model.get_params()
     
     # Load parameters from pre-trained model
     model_name = '/data/lisatmp3/jeasebas/nmt/encdec_600/rnned-long_model0.npz'
@@ -229,45 +232,45 @@ if __name__ == "__main__":
     model = dict(tmp_file)
     tmp_file.close()
 
-    # Lookup
-    encoder.children[0].params[0].set_value(model['W_0_enc_approx_embdr'] + model['b_0_enc_approx_embdr'])
-    # Transition
-    encoder.children[1].params[0].set_value(model['W_enc_transition_0'])
-    encoder.children[1].params[1].set_value(model['G_enc_transition_0'])
-    encoder.children[1].params[2].set_value(model['R_enc_transition_0'])
-    # Input
-    encoder.children[2].children[0].params[0].set_value(model['W_0_enc_input_embdr_0'])
-    encoder.children[2].children[0].params[1].set_value(model['b_0_enc_input_embdr_0'])
-    encoder.children[2].children[1].params[0].set_value(model['W_0_enc_update_embdr_0'])
-    encoder.children[2].children[2].params[0].set_value(model['W_0_enc_reset_embdr_0'])
-    # No biases for update and reset gates in GH. Leave them at 0.
-    
-    decoder.children[0].children[0].params[0].set_value(model['W_0_dec_dec_inputter_0']) # fork_transition_context
-    decoder.children[0].children[0].params[1].set_value(model['b_0_dec_input_embdr_0'])
-    decoder.children[0].children[1].params[0].set_value(model['W_0_dec_dec_updater_0']) # fork_update_context
-    decoder.children[0].children[2].params[0].set_value(model['W_0_dec_dec_reseter_0']) # fork_reset_context
-    # Other biases are not in GH
-    decoder.children[0].children[3].params[0].set_value(model['W_0_dec_initializer_0']) # ??? #fork_states 
-    decoder.children[0].children[3].params[1].set_value(model['b_0_dec_initializer_0'])
-    
-    decoder.children[1].children[0].children[1].children[0].params[0].set_value(model['W_0_dec_approx_embdr'] + model['b_0_dec_approx_embdr']) # lookup table
-    decoder.children[1].children[0].children[2].children[0].params[0].set_value(model['W_0_dec_hid_readout_0']) # transform_states
-    decoder.children[1].children[0].children[2].children[1].params[0].set_value(model['W_0_dec_prev_readout_0']) # transform_feedback
-    decoder.children[1].children[0].children[2].children[2].params[0].set_value(model['W_0_dec_repr_readout']) # transform_readout_context
-    # Is bias at decoder.children[1].children[0].children[3].children[0]?
-    
-    decoder.children[1].children[1].children[0].params[0].set_value(model['W_0_dec_input_embdr_0']) # fork_inputs
-    decoder.children[1].children[1].children[1].params[0].set_value(model['W_0_dec_update_embdr_0']) # fork_update_inputs
-    decoder.children[1].children[1].children[2].params[0].set_value(model['W_0_dec_reset_embdr_0']) # fork_reset_inputs
-    
-    decoder.children[1].children[2].children[0].children[0].params[0].set_value(model['W_dec_transition_0'])
-    decoder.children[1].children[2].children[0].children[0].params[1].set_value(model['G_dec_transition_0'])
-    decoder.children[1].children[2].children[0].children[0].params[2].set_value(model['R_dec_transition_0'])
+    param_dict = Model(cost).get_params()
 
-    decoder.children[1].children[0].children[3].children[0].params[0].set_value(model['b_0_dec_hid_readout_0']) # Bias brick
-    decoder.children[1].children[0].children[3].children[2].params[0].set_value(model['W1_dec_deep_softmax'])
-    decoder.children[1].children[0].children[3].children[3].params[0].set_value(model['W2_dec_deep_softmax'])
-    decoder.children[1].children[0].children[3].children[3].params[1].set_value(model['b_dec_deep_softmax'])
+    param_dict['/encoder/embeddings.W'].set_value(model['W_0_enc_approx_embdr'] + model['b_0_enc_approx_embdr'])
+
+    param_dict['/encoder/encoder_transition.state_to_state'].set_value(model['W_enc_transition_0'])
+    param_dict['/encoder/encoder_transition.state_to_update'].set_value(model['G_enc_transition_0'])
+    param_dict['/encoder/encoder_transition.state_to_reset'].set_value(model['R_enc_transition_0'])
+
+    param_dict['/encoder/fork/fork_inputs.W'].set_value(model['W_0_enc_input_embdr_0'])
+    param_dict['/encoder/fork/fork_inputs.b'].set_value(model['b_0_enc_input_embdr_0'])
+    param_dict['/encoder/fork/fork_update_inputs.W'].set_value(model['W_0_enc_update_embdr_0'])
+    param_dict['/encoder/fork/fork_reset_inputs.W'].set_value(model['W_0_enc_reset_embdr_0'])
+    
+    param_dict['/decoder/fork/fork_transition_context.W'].set_value(model['W_0_dec_dec_inputter_0'])
+    param_dict['/decoder/fork/fork_transition_context.b'].set_value(model['b_0_dec_input_embdr_0'])
+    param_dict['/decoder/fork/fork_update_context.W'].set_value(model['W_0_dec_dec_updater_0'])
+    param_dict['/decoder/fork/fork_reset_context.W'].set_value(model['W_0_dec_dec_reseter_0'])
+
+    param_dict['/decoder/fork/fork_states.W'].set_value(model['W_0_dec_initializer_0'])
+    param_dict['/decoder/fork/fork_states.b'].set_value(model['b_0_dec_initializer_0'])
+    
+    param_dict['/decoder/sequencegenerator/readout/lookupfeedback/lookuptable.W'].set_value(model['W_0_dec_approx_embdr'] + model['b_0_dec_approx_embdr'])
+
+    param_dict['/decoder/sequencegenerator/readout/merge/transform_states.W'].set_value(model['W_0_dec_hid_readout_0'])
+    param_dict['/decoder/sequencegenerator/readout/merge/transform_feedback.W'].set_value(model['W_0_dec_prev_readout_0'])
+    param_dict['/decoder/sequencegenerator/readout/merge/transform_readout_context.W'].set_value(model['W_0_dec_repr_readout'])
+    
+    param_dict['/decoder/sequencegenerator/fork/fork_inputs.W'].set_value(model['W_0_dec_input_embdr_0'])
+    param_dict['/decoder/sequencegenerator/fork/fork_update_inputs.W'].set_value(model['W_0_dec_update_embdr_0'])
+    param_dict['/decoder/sequencegenerator/fork/fork_reset_inputs.W'].set_value(model['W_0_dec_reset_embdr_0'])
+    
+    param_dict['/decoder/sequencegenerator/with_fake_attention/decoder/decoder.state_to_state'].set_value(model['W_dec_transition_0'])
+    param_dict['/decoder/sequencegenerator/with_fake_attention/decoder/decoder.state_to_update'].set_value(model['G_dec_transition_0'])
+    param_dict['/decoder/sequencegenerator/with_fake_attention/decoder/decoder.state_to_reset'].set_value(model['R_dec_transition_0'])
+
+    param_dict['/decoder/sequencegenerator/readout/initializablefeedforwardsequence/bias.b'].set_value(model['b_0_dec_hid_readout_0'])
+    param_dict['W'].set_value(model['W1_dec_deep_softmax'])
+    param_dict['/decoder/sequencegenerator/readout/initializablefeedforwardsequence/linear.W'].set_value(model['W2_dec_deep_softmax'])
+    param_dict['/decoder/sequencegenerator/readout/initializablefeedforwardsequence/linear.b'].set_value(model['b_dec_deep_softmax'])
 
     # Set up training algorithm
     algorithm = GradientDescent(
@@ -285,7 +288,8 @@ if __name__ == "__main__":
             #Plot('En-Fr', channels=[['decoder_cost_cost']],
             #     after_every_batch=True),
             Printing(after_every_batch=True),
-            Checkpoint('model.pkl', every_n_batches=2048)
+            Checkpoint('model.pkl', every_n_batches=2048),
+            FinishAfter(after_n_epochs=1)
         ]
     )
     main_loop.run()
