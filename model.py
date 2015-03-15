@@ -20,6 +20,7 @@ from blocks.extensions import Printing, FinishAfter
 from blocks.extensions.monitoring import TrainingDataMonitoring
 from blocks.extensions.saveload import Checkpoint
 from blocks.extensions.plot import Plot
+from blocks.select import Selector
 
 from blocks.bricks import (Tanh, Maxout, Linear, FeedforwardSequence,
                            Bias, Initializable)
@@ -183,6 +184,68 @@ class Decoder(Initializable):
 
 
 if __name__ == "__main__":
+    # Construct model
+    encoder = Encoder(30001, 620, 1000)
+    decoder = Decoder(30001, 620, 1000, 1000)
+
+    # Initialize model
+    encoder.weights_init = decoder.weights_init = IsotropicGaussian(0.1)
+    encoder.biases_init = decoder.biases_init = Constant(0)
+    encoder.push_initialization_config()
+    decoder.push_initialization_config()
+    encoder.transition.weights_init = Orthogonal()
+    decoder.transition.weights_init = Orthogonal()
+    encoder.initialize()
+    decoder.initialize()
+    
+    enc_param_dict = Selector(encoder).get_params()
+    dec_param_dict = Selector(decoder).get_params()
+
+    # Load parameters from pre-trained model
+    gh_model_name = '/data/lisatmp3/jeasebas/nmt/encdec_600/rnned-long_model0.npz'
+
+    tmp_file = numpy.load(gh_model_name)
+    gh_model = dict(tmp_file)
+    tmp_file.close()
+
+    enc_param_dict['/encoder/embeddings.W'].set_value(gh_model['W_0_enc_approx_embdr'] + gh_model['b_0_enc_approx_embdr'])
+
+    enc_param_dict['/encoder/encoder_transition.state_to_state'].set_value(gh_model['W_enc_transition_0'])
+    enc_param_dict['/encoder/encoder_transition.state_to_update'].set_value(gh_model['G_enc_transition_0'])
+    enc_param_dict['/encoder/encoder_transition.state_to_reset'].set_value(gh_model['R_enc_transition_0'])
+
+    enc_param_dict['/encoder/fork/fork_inputs.W'].set_value(gh_model['W_0_enc_input_embdr_0'])
+    enc_param_dict['/encoder/fork/fork_inputs.b'].set_value(gh_model['b_0_enc_input_embdr_0'])
+    enc_param_dict['/encoder/fork/fork_update_inputs.W'].set_value(gh_model['W_0_enc_update_embdr_0'])
+    enc_param_dict['/encoder/fork/fork_reset_inputs.W'].set_value(gh_model['W_0_enc_reset_embdr_0'])
+
+    dec_param_dict['/decoder/fork/fork_transition_context.W'].set_value(gh_model['W_0_dec_dec_inputter_0'])
+    dec_param_dict['/decoder/fork/fork_transition_context.b'].set_value(gh_model['b_0_dec_input_embdr_0'])
+    dec_param_dict['/decoder/fork/fork_update_context.W'].set_value(gh_model['W_0_dec_dec_updater_0'])
+    dec_param_dict['/decoder/fork/fork_reset_context.W'].set_value(gh_model['W_0_dec_dec_reseter_0'])
+
+    dec_param_dict['/decoder/fork/fork_states.W'].set_value(gh_model['W_0_dec_initializer_0'])
+    dec_param_dict['/decoder/fork/fork_states.b'].set_value(gh_model['b_0_dec_initializer_0'])
+
+    dec_param_dict['/decoder/sequencegenerator/readout/lookupfeedback/lookuptable.W'].set_value(gh_model['W_0_dec_approx_embdr'] + gh_model['b_0_dec_approx_embdr'])
+
+    dec_param_dict['/decoder/sequencegenerator/readout/merge/transform_states.W'].set_value(gh_model['W_0_dec_hid_readout_0'])
+    dec_param_dict['/decoder/sequencegenerator/readout/merge/transform_feedback.W'].set_value(gh_model['W_0_dec_prev_readout_0'])
+    dec_param_dict['/decoder/sequencegenerator/readout/merge/transform_readout_context.W'].set_value(gh_model['W_0_dec_repr_readout'])
+
+    dec_param_dict['/decoder/sequencegenerator/fork/fork_inputs.W'].set_value(gh_model['W_0_dec_input_embdr_0'])
+    dec_param_dict['/decoder/sequencegenerator/fork/fork_update_inputs.W'].set_value(gh_model['W_0_dec_update_embdr_0'])
+    dec_param_dict['/decoder/sequencegenerator/fork/fork_reset_inputs.W'].set_value(gh_model['W_0_dec_reset_embdr_0'])
+
+    dec_param_dict['/decoder/sequencegenerator/with_fake_attention/decoder/decoder.state_to_state'].set_value(gh_model['W_dec_transition_0'])
+    dec_param_dict['/decoder/sequencegenerator/with_fake_attention/decoder/decoder.state_to_update'].set_value(gh_model['G_dec_transition_0'])
+    dec_param_dict['/decoder/sequencegenerator/with_fake_attention/decoder/decoder.state_to_reset'].set_value(gh_model['R_dec_transition_0'])
+
+    dec_param_dict['/decoder/sequencegenerator/readout/initializablefeedforwardsequence/bias.b'].set_value(gh_model['b_0_dec_hid_readout_0'])
+    decoder.children[1].children[0].children[3].children[2].params[0].set_value(gh_model['W1_dec_deep_softmax']) # Not in dec_param_dict
+    dec_param_dict['/decoder/sequencegenerator/readout/initializablefeedforwardsequence/linear.W'].set_value(gh_model['W2_dec_deep_softmax'])
+    dec_param_dict['/decoder/sequencegenerator/readout/initializablefeedforwardsequence/linear.b'].set_value(gh_model['b_dec_deep_softmax'])
+
     # Create Theano variables
     source_sentence = tensor.lmatrix('english')
     source_sentence_mask = tensor.matrix('english_mask')
@@ -202,21 +265,8 @@ if __name__ == "__main__":
     target_sentence_mask.tag.test_value = \
         batch['french_mask']
 
-    # Construct model
-    encoder = Encoder(30001, 620, 1000)
-    decoder = Decoder(30001, 620, 1000, 1000)
     cost = decoder.cost(encoder.apply(source_sentence, source_sentence_mask),
                         target_sentence, target_sentence_mask)
-
-    # Initialize model
-    encoder.weights_init = decoder.weights_init = IsotropicGaussian(0.1)
-    encoder.biases_init = decoder.biases_init = Constant(0)
-    encoder.push_initialization_config()
-    decoder.push_initialization_config()
-    encoder.transition.weights_init = Orthogonal()
-    decoder.transition.weights_init = Orthogonal()
-    encoder.initialize()
-    decoder.initialize()
 
     cg = ComputationGraph(cost)
 
@@ -226,55 +276,8 @@ if __name__ == "__main__":
     for shape, count in Counter(shapes).most_common():
         print('    {:15}: {}'.format(shape, count))
 
-    model = Model(cost)
-    param_dict = model.get_params()
 
-    # Load parameters from pre-trained model
-    gh_model_name = '/data/lisatmp3/jeasebas/nmt/encdec_600/rnned-long_model0.npz'
+    #f = theano.function([target_sentence_mask, target_sentence, source_sentence_mask, source_sentence], cost)
 
-    tmp_file = numpy.load(gh_model_name)
-    gh_model = dict(tmp_file)
-    tmp_file.close()
-
-    param_dict['/encoder/embeddings.W'].set_value(gh_model['W_0_enc_approx_embdr'] + gh_model['b_0_enc_approx_embdr'])
-
-    param_dict['/encoder/encoder_transition.state_to_state'].set_value(gh_model['W_enc_transition_0'])
-    param_dict['/encoder/encoder_transition.state_to_update'].set_value(gh_model['G_enc_transition_0'])
-    param_dict['/encoder/encoder_transition.state_to_reset'].set_value(gh_model['R_enc_transition_0'])
-
-    param_dict['/encoder/fork/fork_inputs.W'].set_value(gh_model['W_0_enc_input_embdr_0'])
-    param_dict['/encoder/fork/fork_inputs.b'].set_value(gh_model['b_0_enc_input_embdr_0'])
-    param_dict['/encoder/fork/fork_update_inputs.W'].set_value(gh_model['W_0_enc_update_embdr_0'])
-    param_dict['/encoder/fork/fork_reset_inputs.W'].set_value(gh_model['W_0_enc_reset_embdr_0'])
-
-    param_dict['/decoder/fork/fork_transition_context.W'].set_value(gh_model['W_0_dec_dec_inputter_0'])
-    param_dict['/decoder/fork/fork_transition_context.b'].set_value(gh_model['b_0_dec_input_embdr_0'])
-    param_dict['/decoder/fork/fork_update_context.W'].set_value(gh_model['W_0_dec_dec_updater_0'])
-    param_dict['/decoder/fork/fork_reset_context.W'].set_value(gh_model['W_0_dec_dec_reseter_0'])
-
-    param_dict['/decoder/fork/fork_states.W'].set_value(gh_model['W_0_dec_initializer_0'])
-    param_dict['/decoder/fork/fork_states.b'].set_value(gh_model['b_0_dec_initializer_0'])
-
-    param_dict['/decoder/sequencegenerator/readout/lookupfeedback/lookuptable.W'].set_value(gh_model['W_0_dec_approx_embdr'] + gh_model['b_0_dec_approx_embdr'])
-
-    param_dict['/decoder/sequencegenerator/readout/merge/transform_states.W'].set_value(gh_model['W_0_dec_hid_readout_0'])
-    param_dict['/decoder/sequencegenerator/readout/merge/transform_feedback.W'].set_value(gh_model['W_0_dec_prev_readout_0'])
-    param_dict['/decoder/sequencegenerator/readout/merge/transform_readout_context.W'].set_value(gh_model['W_0_dec_repr_readout'])
-
-    param_dict['/decoder/sequencegenerator/fork/fork_inputs.W'].set_value(gh_model['W_0_dec_input_embdr_0'])
-    param_dict['/decoder/sequencegenerator/fork/fork_update_inputs.W'].set_value(gh_model['W_0_dec_update_embdr_0'])
-    param_dict['/decoder/sequencegenerator/fork/fork_reset_inputs.W'].set_value(gh_model['W_0_dec_reset_embdr_0'])
-
-    param_dict['/decoder/sequencegenerator/with_fake_attention/decoder/decoder.state_to_state'].set_value(gh_model['W_dec_transition_0'])
-    param_dict['/decoder/sequencegenerator/with_fake_attention/decoder/decoder.state_to_update'].set_value(gh_model['G_dec_transition_0'])
-    param_dict['/decoder/sequencegenerator/with_fake_attention/decoder/decoder.state_to_reset'].set_value(gh_model['R_dec_transition_0'])
-
-    param_dict['/decoder/sequencegenerator/readout/initializablefeedforwardsequence/bias.b'].set_value(gh_model['b_0_dec_hid_readout_0'])
-    param_dict['W'].set_value(gh_model['W1_dec_deep_softmax'])
-    param_dict['/decoder/sequencegenerator/readout/initializablefeedforwardsequence/linear.W'].set_value(gh_model['W2_dec_deep_softmax'])
-    param_dict['/decoder/sequencegenerator/readout/initializablefeedforwardsequence/linear.b'].set_value(gh_model['b_dec_deep_softmax'])
-
-    f = theano.function([target_sentence_mask, target_sentence, source_sentence_mask, source_sentence], cost)
-
-    cur_cost = f(batch['french_mask'], batch['french'], batch['english_mask'], batch['english'])
-    print cur_cost
+    #cur_cost = f(batch['french_mask'], batch['french'], batch['english_mask'], batch['english'])
+    #print cur_cost
