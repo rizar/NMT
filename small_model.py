@@ -32,8 +32,7 @@ from blocks.bricks.sequence_generators import (
     LookupFeedback, Readout, SoftmaxEmitter, SequenceGenerator
 )
 
-from stream import masked_stream
-
+#from stream import masked_stream
 
 # Helper class
 class InitializableFeedforwardSequence(FeedforwardSequence, Initializable):
@@ -135,12 +134,12 @@ class Decoder(Initializable):
             emitter=SoftmaxEmitter(),
             feedback_brick=LookupFeedback(vocab_size, embedding_dim),
             post_merge=InitializableFeedforwardSequence(
-                [Bias(dim=1000).apply,
+                [Bias(dim=4).apply,
                  Maxout(num_pieces=2).apply,
-                 Linear(input_dim=state_dim / 2, output_dim=620,
+                 Linear(input_dim=state_dim / 2, output_dim=3,
                         use_bias=False).apply,
-                 Linear(input_dim=620).apply]),
-            merged_dim=1000)
+                 Linear(input_dim=3).apply]),
+            merged_dim=4)
 
         self.transition = GatedRecurrentWithContext(Tanh(), dim=state_dim,
                                                     name='decoder')
@@ -185,8 +184,8 @@ class Decoder(Initializable):
 
 if __name__ == "__main__":
     # Construct model
-    encoder = Encoder(30001, 620, 1000)
-    decoder = Decoder(30001, 620, 1000, 1000)
+    encoder = Encoder(4, 3, 4)
+    decoder = Decoder(4, 3, 4, 4)
 
     # Initialize model
     encoder.weights_init = decoder.weights_init = IsotropicGaussian(0.1)
@@ -200,51 +199,12 @@ if __name__ == "__main__":
     
     enc_param_dict = Selector(encoder).get_params()
     dec_param_dict = Selector(decoder).get_params()
-
-    # Load parameters from pre-trained model
-    gh_model_name = '/data/lisatmp3/jeasebas/nmt/encdec_600/rnned-long_model0.npz'
-
-    tmp_file = numpy.load(gh_model_name)
-    gh_model = dict(tmp_file)
-    tmp_file.close()
-
-    enc_param_dict['/encoder/embeddings.W'].set_value(gh_model['W_0_enc_approx_embdr'] + gh_model['b_0_enc_approx_embdr'])
-
-    enc_param_dict['/encoder/encoder_transition.state_to_state'].set_value(gh_model['W_enc_transition_0'])
-    enc_param_dict['/encoder/encoder_transition.state_to_update'].set_value(gh_model['G_enc_transition_0'])
-    enc_param_dict['/encoder/encoder_transition.state_to_reset'].set_value(gh_model['R_enc_transition_0'])
-
-    enc_param_dict['/encoder/fork/fork_inputs.W'].set_value(gh_model['W_0_enc_input_embdr_0'])
-    enc_param_dict['/encoder/fork/fork_inputs.b'].set_value(gh_model['b_0_enc_input_embdr_0'])
-    enc_param_dict['/encoder/fork/fork_update_inputs.W'].set_value(gh_model['W_0_enc_update_embdr_0'])
-    enc_param_dict['/encoder/fork/fork_reset_inputs.W'].set_value(gh_model['W_0_enc_reset_embdr_0'])
-
-    dec_param_dict['/decoder/fork/fork_transition_context.W'].set_value(gh_model['W_0_dec_dec_inputter_0'])
-    dec_param_dict['/decoder/fork/fork_transition_context.b'].set_value(gh_model['b_0_dec_input_embdr_0'])
-    dec_param_dict['/decoder/fork/fork_update_context.W'].set_value(gh_model['W_0_dec_dec_updater_0'])
-    dec_param_dict['/decoder/fork/fork_reset_context.W'].set_value(gh_model['W_0_dec_dec_reseter_0'])
-
-    dec_param_dict['/decoder/fork/fork_states.W'].set_value(gh_model['W_0_dec_initializer_0'])
-    dec_param_dict['/decoder/fork/fork_states.b'].set_value(gh_model['b_0_dec_initializer_0'])
-
-    dec_param_dict['/decoder/sequencegenerator/readout/lookupfeedback/lookuptable.W'].set_value(gh_model['W_0_dec_approx_embdr'] + gh_model['b_0_dec_approx_embdr'])
-
-    dec_param_dict['/decoder/sequencegenerator/readout/merge/transform_states.W'].set_value(gh_model['W_0_dec_hid_readout_0'])
-    dec_param_dict['/decoder/sequencegenerator/readout/merge/transform_feedback.W'].set_value(gh_model['W_0_dec_prev_readout_0'])
-    dec_param_dict['/decoder/sequencegenerator/readout/merge/transform_readout_context.W'].set_value(gh_model['W_0_dec_repr_readout'])
-
-    dec_param_dict['/decoder/sequencegenerator/fork/fork_inputs.W'].set_value(gh_model['W_0_dec_input_embdr_0'])
-    dec_param_dict['/decoder/sequencegenerator/fork/fork_update_inputs.W'].set_value(gh_model['W_0_dec_update_embdr_0'])
-    dec_param_dict['/decoder/sequencegenerator/fork/fork_reset_inputs.W'].set_value(gh_model['W_0_dec_reset_embdr_0'])
-
-    dec_param_dict['/decoder/sequencegenerator/with_fake_attention/decoder/decoder.state_to_state'].set_value(gh_model['W_dec_transition_0'])
-    dec_param_dict['/decoder/sequencegenerator/with_fake_attention/decoder/decoder.state_to_update'].set_value(gh_model['G_dec_transition_0'])
-    dec_param_dict['/decoder/sequencegenerator/with_fake_attention/decoder/decoder.state_to_reset'].set_value(gh_model['R_dec_transition_0'])
-
-    dec_param_dict['/decoder/sequencegenerator/readout/initializablefeedforwardsequence/bias.b'].set_value(gh_model['b_0_dec_hid_readout_0'])
-    decoder.children[1].children[0].children[3].children[2].params[0].set_value(gh_model['W1_dec_deep_softmax']) # Not in dec_param_dict
-    dec_param_dict['/decoder/sequencegenerator/readout/initializablefeedforwardsequence/linear.W'].set_value(gh_model['W2_dec_deep_softmax'])
-    dec_param_dict['/decoder/sequencegenerator/readout/initializablefeedforwardsequence/linear.b'].set_value(gh_model['b_dec_deep_softmax'])
+    
+    for key in enc_param_dict:
+        print key, enc_param_dict[key].get_value()
+    for key in dec_param_dict:
+        print key, dec_param_dict[key].get_value()
+    print 'W1_dec_deep_softmax', decoder.children[1].children[0].children[3].children[2].params[0].get_value()
 
     # Create Theano variables
     source_sentence = tensor.lmatrix('english')
@@ -253,7 +213,15 @@ if __name__ == "__main__":
     target_sentence_mask = tensor.matrix('french_mask')
 
     epoch_iterator = masked_stream.get_epoch_iterator(as_dict=True)
-    batch = next(epoch_iterator)
+    #batch = next(epoch_iterator)
+    
+    # Use 0 as EOS symbol
+    # Mask is 1 for the first 0.
+    batch = {}
+    batch['english'] = numpy.asarray([[3, 0, 0], [2, 1, 0]])
+    batch['english_mask'] = numpy.asarray([[1, 1, 0], [1, 1, 1]])
+    batch['french'] = numpy.asarray([[2, 3, 0], [1, 0, 0]])
+    batch['french_mask'] = numpy.asarray([[1, 1, 1], [1, 1, 0]])
 
     # Test values
     theano.config.compute_test_value = 'warn'
