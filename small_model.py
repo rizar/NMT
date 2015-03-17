@@ -201,10 +201,13 @@ if __name__ == "__main__":
     dec_param_dict = Selector(decoder).get_params()
     
     for key in enc_param_dict:
-        print key, enc_param_dict[key].get_value()
+        print key
+        print enc_param_dict[key].get_value()
     for key in dec_param_dict:
-        print key, dec_param_dict[key].get_value()
-    print 'W1_dec_deep_softmax', decoder.children[1].children[0].children[3].children[2].params[0].get_value()
+        print key
+        print dec_param_dict[key].get_value()
+    print 'W1_dec_deep_softmax'
+    print decoder.children[1].children[0].children[3].children[2].params[0].get_value()
 
     # Create Theano variables
     source_sentence = tensor.lmatrix('english')
@@ -212,16 +215,16 @@ if __name__ == "__main__":
     target_sentence = tensor.lmatrix('french')
     target_sentence_mask = tensor.matrix('french_mask')
 
-    epoch_iterator = masked_stream.get_epoch_iterator(as_dict=True)
+    #epoch_iterator = masked_stream.get_epoch_iterator(as_dict=True)
     #batch = next(epoch_iterator)
     
     # Use 0 as EOS symbol
     # Mask is 1 for the first 0.
     batch = {}
     batch['english'] = numpy.asarray([[3, 0, 0], [2, 1, 0]])
-    batch['english_mask'] = numpy.asarray([[1, 1, 0], [1, 1, 1]])
+    batch['english_mask'] = numpy.asarray([[1, 1, 0], [1, 1, 1]], dtype=numpy.float32)
     batch['french'] = numpy.asarray([[2, 3, 0], [1, 0, 0]])
-    batch['french_mask'] = numpy.asarray([[1, 1, 1], [1, 1, 0]])
+    batch['french_mask'] = numpy.asarray([[1, 1, 1], [1, 1, 0]], dtype=numpy.float32)
 
     # Test values
     theano.config.compute_test_value = 'warn'
@@ -245,7 +248,7 @@ if __name__ == "__main__":
         print('    {:15}: {}'.format(shape, count))
 
 
-    #f = theano.function([target_sentence_mask, target_sentence, source_sentence_mask, source_sentence], cost)
+    f = theano.function([target_sentence_mask, target_sentence, source_sentence_mask, source_sentence], cost)
 
-    #cur_cost = f(batch['french_mask'], batch['french'], batch['english_mask'], batch['english'])
-    #print cur_cost
+    cur_cost = f(batch['french_mask'], batch['french'], batch['english_mask'], batch['english'])
+    print cur_cost
