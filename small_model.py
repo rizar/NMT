@@ -252,3 +252,8 @@ if __name__ == "__main__":
 
     cur_cost = f(batch['french_mask'], batch['french'], batch['english_mask'], batch['english'])
     print cur_cost
+    
+    g = theano.function([source_sentence_mask, source_sentence], encoder.apply(source_sentence, source_sentence_mask))
+
+    repr = g(batch['english_mask'], batch['english'])
+    print repr
