@@ -33,6 +33,26 @@ from blocks.bricks.sequence_generators import (
 
 from stream import masked_stream
 
+class LookupFeedbackWMT15(LookupFeedback):
+
+    @application
+    def feedback(self, outputs):
+        assert self.output_dim == 0
+        
+        shp = [outputs.shape[i] for i in xrange(outputs.ndim)]
+        outputs_flat = outputs.flatten()
+        
+        lookup_flat = tensor.switch(outputs_flat[:, None] < 0,
+                      tensor.alloc(0., outputs_flat.shape[0], self.feedback_dim),
+                      self.lookup.apply(outputs_flat))
+        lookup = lookup_flat.reshape(shp+[self.feedback_dim])
+        return lookup
+
+class SoftmaxEmitterWMT15(SoftmaxEmitter):
+
+    @application
+    def initial_outputs(self, batch_size, *args, **kwargs):
+        return -tensor.ones((batch_size,), dtype='int64')
 
 # Helper class
 class InitializableFeedforwardSequence(FeedforwardSequence, Initializable):
@@ -131,8 +151,8 @@ class Decoder(Initializable):
         readout = Readout(
             source_names=['states', 'feedback', 'readout_context'],
             readout_dim=self.vocab_size,
-            emitter=SoftmaxEmitter(),
-            feedback_brick=LookupFeedback(vocab_size, embedding_dim),
+            emitter=SoftmaxEmitterWMT15(),
+            feedback_brick=LookupFeedbackWMT15(vocab_size, embedding_dim),
             post_merge=InitializableFeedforwardSequence(
                 [Bias(dim=1000).apply,
                  Maxout(num_pieces=2).apply,
