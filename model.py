@@ -20,6 +20,7 @@ from blocks.extensions import Printing
 from blocks.extensions.monitoring import TrainingDataMonitoring
 from blocks.extensions.saveload import Checkpoint
 from blocks.extensions.plot import Plot
+from blocks.utils import dict_union, dict_subset
 
 from blocks.bricks import (Tanh, Maxout, Linear, FeedforwardSequence,
                            Bias, Initializable)
@@ -53,6 +54,70 @@ class SoftmaxEmitterWMT15(SoftmaxEmitter):
     @application
     def initial_outputs(self, batch_size, *args, **kwargs):
         return -tensor.ones((batch_size,), dtype='int64')
+
+class SequenceGeneratorWMT15(SequenceGenerator):
+
+    @application
+    def cost(self, application_call, outputs, mask=None, **kwargs):
+        """Returns generation costs for output sequences.
+
+        Parameters
+        ----------
+        outputs : :class:`~tensor.TensorVariable`
+            The 3(2) dimensional tensor containing output sequences.
+            The dimension 0 must stand for time, the dimension 1 for the
+            position on the batch.
+        mask : :class:`~tensor.TensorVariable`
+            The binary matrix identifying fake outputs.
+
+        Notes
+        -----
+        The contexts are expected as keyword arguments.
+
+        """
+        # We assume the data has axes (time, batch, features, ...)
+        batch_size = outputs.shape[1]
+
+        # Prepare input for the iterative part
+        states = dict_subset(kwargs, self._state_names, must_have=False)
+        contexts = dict_subset(kwargs, self._context_names)
+        feedback = self.readout.feedback(outputs)
+
+        feedback = tensor.roll(feedback, 1, 0)
+        feedback = tensor.set_subtensor(
+            feedback[0],
+            tensor.zeros_like(feedback[0]))
+
+        inputs = self.fork.apply(feedback, as_dict=True)
+
+        # Run the recurrent network
+        results = self.transition.apply(
+            mask=mask, return_initial_states=True, as_dict=True,
+            **dict_union(inputs, states, contexts))
+
+        # Separate the deliverables. The first states are discarded: they
+        # are not used to predict any output symbol. The initial glimpses
+        # are discarded because they are not used for prediction.
+        # Remember, glimpses are computed _before_ output stage, states are
+        # computed after.
+        states = {name: results[name][1:] for name in self._state_names}
+        glimpses = {name: results[name][1:] for name in self._glimpse_names}
+
+        # Compute the cost
+        feedback = tensor.set_subtensor(
+            feedback[0],
+            self.readout.feedback(self.readout.initial_outputs(
+                batch_size, **contexts)))
+        readouts = self.readout.readout(
+            feedback=feedback, **dict_union(states, glimpses, contexts))
+        costs = self.readout.cost(readouts, outputs)
+        if mask is not None:
+            costs *= mask
+
+        for name, variable in list(glimpses.items()) + list(states.items()):
+            application_call.add_auxiliary_variable(
+                variable.copy(), name=name)
+        return costs
 
 # Helper class
 class InitializableFeedforwardSequence(FeedforwardSequence, Initializable):
@@ -170,7 +235,7 @@ class Decoder(Initializable):
                           self.transition.apply.states
                           if name != 'readout_context'], prototype=Linear())
 
-        self.sequence_generator = SequenceGenerator(
+        self.sequence_generator = SequenceGeneratorWMT15(
             readout=readout, transition=self.transition,
             fork_inputs=[name for name in self.transition.apply.sequences
                          if name != 'mask'],
