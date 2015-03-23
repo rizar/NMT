@@ -104,10 +104,6 @@ class SequenceGeneratorWMT15(SequenceGenerator):
         glimpses = {name: results[name][1:] for name in self._glimpse_names}
 
         # Compute the cost
-        feedback = tensor.set_subtensor(
-            feedback[0],
-            self.readout.feedback(self.readout.initial_outputs(
-                batch_size, **contexts)))
         readouts = self.readout.readout(
             feedback=feedback, **dict_union(states, glimpses, contexts))
         costs = self.readout.cost(readouts, outputs)
