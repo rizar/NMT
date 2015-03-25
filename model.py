@@ -149,6 +149,7 @@ class Decoder(Initializable):
                           self.transition.apply.contexts +
                           self.transition.apply.states
                           if name != 'readout_context'], prototype=Linear())
+        self.tanh = Tanh()
 
         self.sequence_generator = SequenceGenerator(
             readout=readout, transition=self.transition,
@@ -156,7 +157,7 @@ class Decoder(Initializable):
                          if name != 'mask'],
         )
 
-        self.children = [self.fork, self.sequence_generator]
+        self.children = [self.fork, self.sequence_generator, self.tanh]
 
     def _push_allocation_config(self):
         self.fork.input_dim = self.representation_dim
@@ -174,6 +175,7 @@ class Decoder(Initializable):
                     if key not in self.transition.apply.states else value
                     for key, value
                     in self.fork.apply(representation, as_dict=True).items()}
+        contexts['states'] = self.tanh.apply(contexts['states'])
         cost = self.sequence_generator.cost(**merge(
             contexts, {'mask': target_sentence_mask,
                        'outputs': target_sentence,
