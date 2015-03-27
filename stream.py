@@ -16,22 +16,14 @@ from fuel.schemes import ConstantScheme
 from fuel.transformers import Merge, Batch, Filter, Padding
 
 en_vocab, fr_vocab = [os.path.join(config.data_path, 'mt',
-                                   '{}_vocab_clean_30000.pkl'.format(lang))
+                                   'vocab.{}.pkl'.format(lang))
                       for lang in ['en', 'fr']]
 
-sources = ['commoncrawl.fr-en',
-           'news-commentary-v10.fr-en',
-           'giga-fren.release2',
-           'training/europarl-v7.fr-en',
-           'un/undoc.2000.fr-en']
-
 en_files = [os.path.join(config.data_path, 'mt',
-                         source + '.token.true.clean.en')
-            for source in sources]
+                         'all.tok.clean.fr-en.en')]
 
 fr_files = [os.path.join(config.data_path, 'mt',
-                         source + '.token.true.clean.fr')
-            for source in sources]
+                         'all.tok.clean.fr-en.fr')]
 
 
 class CycleTextFile(TextFile):
