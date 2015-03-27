@@ -319,7 +319,7 @@ if __name__ == "__main__":
     encoder.biases_init = decoder.biases_init = Constant(0)
     encoder.push_initialization_config()
     decoder.push_initialization_config()
-    encoder.transition.weights_init = Orthogonal()
+    encoder.bidir.prototype.weights_init = Orthogonal()
     decoder.transition.weights_init = Orthogonal()
     encoder.initialize()
     decoder.initialize()
