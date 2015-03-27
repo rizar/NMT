@@ -41,9 +41,10 @@ class InitializableFeedforwardSequence(FeedforwardSequence, Initializable):
 
 
 class GatedRecurrentWithContext(Initializable):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, representation_dim, *args, **kwargs):
         self.gated_recurrent = GatedRecurrent(*args, **kwargs)
         self.children = [self.gated_recurrent]
+        self.representation_dim = representation_dim
 
     @application(states=['states'], outputs=['states'],
                  contexts=['readout_context', 'transition_context',
@@ -58,9 +59,10 @@ class GatedRecurrentWithContext(Initializable):
         return self.gated_recurrent.apply(*args, **kwargs)
 
     def get_dim(self, name):
-        if name in ['readout_context', 'transition_context',
-                    'update_context', 'reset_context']:
+        if name in ['transition_context', 'update_context', 'reset_context']:
             return self.dim
+        if name in ['readout_context']:
+            return self.representation_dim
         return self.gated_recurrent.get_dim(name)
 
     def __getattr__(self, name):
@@ -175,7 +177,6 @@ class Decoder(Initializable):
         self.embedding_dim = embedding_dim
         self.state_dim = state_dim
         self.representation_dim = representation_dim
-        import ipdb;ipdb.set_trace()
         readout = Readout(
             source_names=['states', 'feedback', 'readout_context'],
             readout_dim=self.vocab_size,
@@ -188,13 +189,10 @@ class Decoder(Initializable):
                         use_bias=False).apply,
                  Linear(input_dim=100).apply]),
             merged_dim=1000)
-        readout.merge.input_dims = [1000, 100, 2000]
-        readout.merge.output_dim = 1000
-        self.transition = GatedRecurrentWithContext(state_dim, activation=Tanh(),
-                                                    name='decoder')
+        self.transition = GatedRecurrentWithContext(representation_dim,
+                                  state_dim, activation=Tanh(), name='decoder')
         # Readout will apply the linear transformation to 'readout_context'
         # with a Merge brick, so no need to fork it here
-        import ipdb;ipdb.set_trace()
         self.fork = Fork([name for name in
                           self.transition.apply.contexts +
                           self.transition.apply.states
@@ -221,7 +219,6 @@ class Decoder(Initializable):
         target_sentence_mask = target_sentence_mask.T
 
         # The initial state and contexts, all functions of the representation
-        import ipdb; ipdb.set_trace()
         contexts = {key: value.dimshuffle('x', 0, 1)
                     if key not in self.transition.apply.states else value
                     for key, value
@@ -267,9 +264,12 @@ if __name__ == "__main__":
     else:
         encoder = Encoder(30000, 100, 1000)
         decoder = Decoder(30000, 100, 1000, 1000)
+    reps = encoder.apply(source_sentence, source_sentence_mask)
+    #print decoder.children[1].children[0].children[2].children[2]
+    cost = decoder.cost(reps,
+                        target_sentence, target_sentence_mask)
 
     enc_representation = encoder.apply(source_sentence, source_sentence_mask)
-
     # Initialize model
     encoder.weights_init = decoder.weights_init = IsotropicGaussian(0.1)
     encoder.biases_init = decoder.biases_init = Constant(0)
@@ -280,19 +280,16 @@ if __name__ == "__main__":
     encoder.initialize()
     decoder.initialize()
 
-    cost = decoder.cost(encoder.apply(source_sentence, source_sentence_mask),
-                        target_sentence, target_sentence_mask)
-
     f = theano.function([source_sentence, source_sentence_mask], enc_representation)
     g = theano.function([source_sentence, source_sentence_mask,
                          target_sentence, target_sentence_mask], cost)
     s_ = numpy.random.randint(10, size=(5, 10))
-    m_ = numpy.random.rand(5, 10).astype('float32')
+    ms_ = numpy.random.rand(5, 10).astype('float32')
     t_ = numpy.random.randint(10, size=(5, 10))
-    tm_ = numpy.random.rand(5, 10).astype('float32')
-    import ipdb;ipdb.set_trace()
-    enc = f(s_, m_)
-    dec = g(s_, m_, t_, tm_)
+    mt_ = numpy.random.rand(5, 10).astype('float32')
+
+    enc_out = f(s_, ms_)
+    dec_out = g(s_, ms_, t_, mt_)
 
     '''
     # Initialize model
