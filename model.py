@@ -5,6 +5,7 @@
 #      on my computer, which makes things very slow. CuDNN gives a 2x speedup
 #      in my case, so it's worth installing.
 from collections import Counter
+import argparse
 import numpy
 import theano
 from theano import tensor
@@ -26,7 +27,7 @@ from blocks.bricks import (Tanh, Maxout, Linear, FeedforwardSequence,
 from blocks.bricks.base import application
 from blocks.bricks.lookup import LookupTable
 from blocks.bricks.parallel import Fork
-from blocks.bricks.recurrent import GatedRecurrent
+from blocks.bricks.recurrent import GatedRecurrent, Bidirectional
 from blocks.bricks.sequence_generators import (
     LookupFeedback, Readout, SoftmaxEmitter, SequenceGenerator
 )
@@ -87,7 +88,8 @@ class Encoder(Initializable):
         self.reverse = reverse
 
         self.lookup = LookupTable(name='embeddings')
-        self.transition = GatedRecurrent(Tanh(), name='encoder_transition')
+        self.transition = GatedRecurrent(state_dim, activation=Tanh(),
+                                         name='encoder_transition')
         self.fork = Fork([name for name in self.transition.apply.sequences
                           if name != 'mask'], prototype=Linear())
 
@@ -119,6 +121,52 @@ class Encoder(Initializable):
         return representation[-1]
 
 
+class BidirectionalEncoder(Initializable):
+    def __init__(self, vocab_size, embedding_dim, state_dim, reverse=True,
+                 **kwargs):
+        super(BidirectionalEncoder, self).__init__(**kwargs)
+        bidir = Bidirectional(
+            GatedRecurrent(state_dim, activation=Tanh()))
+        fork = Fork([name for name in bidir.prototype.apply.sequences
+                     if name != 'mask'], prototype=Linear())
+        self.lookup = LookupTable(name='embeddings')
+
+        self.vocab_size = vocab_size
+        self.embedding_dim = embedding_dim
+        self.state_dim = state_dim
+        self.reverse = reverse
+        self.transition = bidir
+        self.fork = fork
+        self.children = [self.lookup, self.transition, self.fork]
+
+        self.fork.input_dim = self.embedding_dim
+        self.fork.output_dims = [self.state_dim
+                                 for _ in self.fork.output_names]
+
+    def _push_allocation_config(self):
+        self.lookup.length = self.vocab_size
+        self.lookup.dim = self.embedding_dim
+        self.transition.dim = self.state_dim
+
+    @application(inputs=['source_sentence', 'source_sentence_mask'],
+                 outputs=['representation'])
+    def apply(self, source_sentence, source_sentence_mask):
+        # Time as first dimension
+        source_sentence = source_sentence.dimshuffle(1, 0)
+        source_sentence_mask = source_sentence_mask.T
+        if self.reverse:
+            source_sentence = source_sentence[::-1]
+            source_sentence_mask = source_sentence_mask[::-1]
+
+        embeddings = self.lookup.apply(source_sentence)
+
+        representation = self.transition.apply(**merge(
+            self.fork.apply(embeddings, as_dict=True),
+            {'mask': source_sentence_mask}
+        ))
+        return representation[-1]
+
+
 class Decoder(Initializable):
     def __init__(self, vocab_size, embedding_dim, state_dim,
                  representation_dim, **kwargs):
@@ -127,7 +175,7 @@ class Decoder(Initializable):
         self.embedding_dim = embedding_dim
         self.state_dim = state_dim
         self.representation_dim = representation_dim
-
+        import ipdb;ipdb.set_trace()
         readout = Readout(
             source_names=['states', 'feedback', 'readout_context'],
             readout_dim=self.vocab_size,
@@ -140,11 +188,13 @@ class Decoder(Initializable):
                         use_bias=False).apply,
                  Linear(input_dim=100).apply]),
             merged_dim=1000)
-
-        self.transition = GatedRecurrentWithContext(Tanh(), dim=state_dim,
+        readout.merge.input_dims = [1000, 100, 2000]
+        readout.merge.output_dim = 1000
+        self.transition = GatedRecurrentWithContext(state_dim, activation=Tanh(),
                                                     name='decoder')
         # Readout will apply the linear transformation to 'readout_context'
         # with a Merge brick, so no need to fork it here
+        import ipdb;ipdb.set_trace()
         self.fork = Fork([name for name in
                           self.transition.apply.contexts +
                           self.transition.apply.states
@@ -171,12 +221,13 @@ class Decoder(Initializable):
         target_sentence_mask = target_sentence_mask.T
 
         # The initial state and contexts, all functions of the representation
+        import ipdb; ipdb.set_trace()
         contexts = {key: value.dimshuffle('x', 0, 1)
                     if key not in self.transition.apply.states else value
                     for key, value
                     in self.fork.apply(representation, as_dict=True).items()}
         contexts['states'] = self.tanh.apply(contexts['states'])
-        cost = self.sequence_generator.cost(**merge(
+        cost = self.sequence_generator.cost_matrix(**merge(
             contexts, {'mask': target_sentence_mask,
                        'outputs': target_sentence,
                        'readout_context': representation.dimshuffle('x', 0, 1)}
@@ -186,6 +237,14 @@ class Decoder(Initializable):
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        "Encoder-Decoder implementation for machine translation.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument(
+        "--bidirectional-enc", default=False, action="store_true",
+        help="Train on this many batches.")
+    args = parser.parse_args()
+
     # Create Theano variables
     source_sentence = tensor.lmatrix('english')
     source_sentence_mask = tensor.matrix('english_mask')
@@ -202,11 +261,40 @@ if __name__ == "__main__":
         numpy.random.rand(10, 10).astype('float32')
 
     # Construct model
-    encoder = Encoder(30000, 100, 1000)
-    decoder = Decoder(30000, 100, 1000, 1000)
+    if args.bidirectional_enc:
+        encoder = BidirectionalEncoder(30000, 100, 1000)
+        decoder = Decoder(30000, 100, 1000, 1000*2)
+    else:
+        encoder = Encoder(30000, 100, 1000)
+        decoder = Decoder(30000, 100, 1000, 1000)
+
+    enc_representation = encoder.apply(source_sentence, source_sentence_mask)
+
+    # Initialize model
+    encoder.weights_init = decoder.weights_init = IsotropicGaussian(0.1)
+    encoder.biases_init = decoder.biases_init = Constant(0)
+    encoder.push_initialization_config()
+    decoder.push_initialization_config()
+    encoder.transition.weights_init = Orthogonal()
+    decoder.transition.weights_init = Orthogonal()
+    encoder.initialize()
+    decoder.initialize()
+
     cost = decoder.cost(encoder.apply(source_sentence, source_sentence_mask),
                         target_sentence, target_sentence_mask)
 
+    f = theano.function([source_sentence, source_sentence_mask], enc_representation)
+    g = theano.function([source_sentence, source_sentence_mask,
+                         target_sentence, target_sentence_mask], cost)
+    s_ = numpy.random.randint(10, size=(5, 10))
+    m_ = numpy.random.rand(5, 10).astype('float32')
+    t_ = numpy.random.randint(10, size=(5, 10))
+    tm_ = numpy.random.rand(5, 10).astype('float32')
+    import ipdb;ipdb.set_trace()
+    enc = f(s_, m_)
+    dec = g(s_, m_, t_, tm_)
+
+    '''
     # Initialize model
     encoder.weights_init = decoder.weights_init = IsotropicGaussian(0.1)
     encoder.biases_init = decoder.biases_init = Constant(0)
@@ -237,11 +325,12 @@ if __name__ == "__main__":
         algorithm=algorithm,
         data_stream=masked_stream,
         extensions=[
-            TrainingDataMonitoring([cost], after_every_batch=True),
+            TrainingDataMonitoring([cost], after_batch=True),
             Plot('En-Fr', channels=[['decoder_cost_cost']],
-                 after_every_batch=True),
-            Printing(after_every_batch=True),
+                 after_batch=True),
+            Printing(after_batch=True),
             Checkpoint('model.pkl', every_n_batches=2048)
         ]
     )
     main_loop.run()
+    '''
