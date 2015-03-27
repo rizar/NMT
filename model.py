@@ -24,6 +24,7 @@ from blocks.extensions.plot import Plot
 
 from blocks.bricks import (Tanh, Maxout, Linear, FeedforwardSequence,
                            Bias, Initializable)
+from blocks.bricks.attention import SequenceContentAttention
 from blocks.bricks.base import application
 from blocks.bricks.lookup import LookupTable
 from blocks.bricks.parallel import Fork
@@ -120,7 +121,7 @@ class Encoder(Initializable):
             self.fork.apply(embeddings, as_dict=True),
             {'mask': source_sentence_mask}
         ))
-        return representation[-1]
+        return representation
 
 
 class BidirectionalEncoder(Initializable):
@@ -166,17 +167,27 @@ class BidirectionalEncoder(Initializable):
             self.fork.apply(embeddings, as_dict=True),
             {'mask': source_sentence_mask}
         ))
-        return representation[-1]
+        return representation
 
 
 class Decoder(Initializable):
     def __init__(self, vocab_size, embedding_dim, state_dim,
-                 representation_dim, **kwargs):
+                 representation_dim, use_attention=False, **kwargs):
         super(Decoder, self).__init__(**kwargs)
         self.vocab_size = vocab_size
         self.embedding_dim = embedding_dim
         self.state_dim = state_dim
         self.representation_dim = representation_dim
+        self.use_attention = use_attention
+
+        self.transition = GatedRecurrentWithContext(representation_dim,
+                                  state_dim, activation=Tanh(), name='decoder')
+        if self.use_attention:
+            self.attention = SequenceContentAttention(
+                state_names=self.transition.apply.states,
+                attended_dim=representation_dim,
+                match_dim=state_dim, name="attention")
+
         readout = Readout(
             source_names=['states', 'feedback', 'readout_context'],
             readout_dim=self.vocab_size,
@@ -189,8 +200,7 @@ class Decoder(Initializable):
                         use_bias=False).apply,
                  Linear(input_dim=100).apply]),
             merged_dim=1000)
-        self.transition = GatedRecurrentWithContext(representation_dim,
-                                  state_dim, activation=Tanh(), name='decoder')
+
         # Readout will apply the linear transformation to 'readout_context'
         # with a Merge brick, so no need to fork it here
         self.fork = Fork([name for name in
@@ -201,6 +211,7 @@ class Decoder(Initializable):
 
         self.sequence_generator = SequenceGenerator(
             readout=readout, transition=self.transition,
+            attention=self.attention if self.use_attention else None,
             fork_inputs=[name for name in self.transition.apply.sequences
                          if name != 'mask'],
         )
@@ -212,22 +223,35 @@ class Decoder(Initializable):
         self.fork.output_dims = [self.state_dim
                                  for _ in self.fork.output_names]
 
-    @application(inputs=['representation', 'target_sentence_mask',
-                         'target_sentence'], outputs=['cost'])
-    def cost(self, representation, target_sentence, target_sentence_mask):
+    @application(inputs=['representations', 'source_sentence_mask',
+                         'target_sentence_mask', 'target_sentence'],
+                 outputs=['cost'])
+    def cost(self, representations, source_sentence_mask,
+             target_sentence, target_sentence_mask):
+
+        source_sentence_mask = source_sentence_mask.T
         target_sentence = target_sentence.dimshuffle(1, 0)
         target_sentence_mask = target_sentence_mask.T
 
+        # Extract last step of representation if regular enc-dec
+        representation = representations if self.use_attention \
+                            else representations[-1].dimshuffle('x', 0, 1)
+
         # The initial state and contexts, all functions of the representation
         contexts = {key: value.dimshuffle('x', 0, 1)
-                    if key not in self.transition.apply.states else value
+                    if key not in self.transition.apply.states
+                    and value.ndim == 2 else value
                     for key, value
                     in self.fork.apply(representation, as_dict=True).items()}
         contexts['states'] = self.tanh.apply(contexts['states'])
+
+        # Get the cost matrix
         cost = self.sequence_generator.cost_matrix(**merge(
             contexts, {'mask': target_sentence_mask,
                        'outputs': target_sentence,
-                       'readout_context': representation.dimshuffle('x', 0, 1)}
+                       'readout_context': representation,
+                       'attended': representation,
+                       'attended_mask': source_sentence_mask}
         ))
 
         return (cost * target_sentence_mask).sum() / target_sentence_mask.sum()
@@ -239,7 +263,10 @@ if __name__ == "__main__":
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument(
         "--bidirectional-enc", default=False, action="store_true",
-        help="Train on this many batches.")
+        help="Flag to use bidirectional-RNN in the encoder.")
+    parser.add_argument(
+        "--use-attention", default=False, action="store_true",
+        help="Falg to use attention mechanism in the decoder RNN.")
     args = parser.parse_args()
 
     # Create Theano variables
@@ -260,16 +287,18 @@ if __name__ == "__main__":
     # Construct model
     if args.bidirectional_enc:
         encoder = BidirectionalEncoder(30000, 100, 1000)
-        decoder = Decoder(30000, 100, 1000, 1000*2)
+        decoder = Decoder(30000, 100, 1000, 1000*2,
+                          use_attention=args.use_attention)
     else:
         encoder = Encoder(30000, 100, 1000)
-        decoder = Decoder(30000, 100, 1000, 1000)
-    reps = encoder.apply(source_sentence, source_sentence_mask)
-    #print decoder.children[1].children[0].children[2].children[2]
-    cost = decoder.cost(reps,
+        decoder = Decoder(30000, 100, 1000, 1000,
+                          use_attention=args.use_attention)
+
+    # Get Cost
+    enc_representation = encoder.apply(source_sentence, source_sentence_mask)
+    cost = decoder.cost(enc_representation, source_sentence_mask,
                         target_sentence, target_sentence_mask)
 
-    enc_representation = encoder.apply(source_sentence, source_sentence_mask)
     # Initialize model
     encoder.weights_init = decoder.weights_init = IsotropicGaussian(0.1)
     encoder.biases_init = decoder.biases_init = Constant(0)
@@ -280,7 +309,8 @@ if __name__ == "__main__":
     encoder.initialize()
     decoder.initialize()
 
-    f = theano.function([source_sentence, source_sentence_mask], enc_representation)
+    f = theano.function([source_sentence, source_sentence_mask],
+                        enc_representation)
     g = theano.function([source_sentence, source_sentence_mask,
                          target_sentence, target_sentence_mask], cost)
     s_ = numpy.random.randint(10, size=(5, 10))
