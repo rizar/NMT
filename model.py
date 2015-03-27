@@ -10,6 +10,7 @@ import numpy
 import theano
 from theano import tensor
 from toolz import merge
+from picklable_itertools.extras import equizip
 
 from blocks.algorithms import (GradientDescent, StepClipping, AdaDelta,
                                CompositeRule)
@@ -41,6 +42,19 @@ class InitializableFeedforwardSequence(FeedforwardSequence, Initializable):
     pass
 
 
+class BidirectionalWMT15(Bidirectional):
+
+    @application
+    def apply(self, forward_dict, backward_dict):
+        """Applies forward and backward networks and concatenates outputs."""
+        forward = self.children[0].apply(as_list=True, **forward_dict)
+        backward = [x[::-1] for x in
+                    self.children[1].apply(reverse=True, as_list=True,
+                                           **backward_dict)]
+        return [tensor.concatenate([f, b], axis=2)
+                for f, b in equizip(forward, backward)]
+
+
 class GatedRecurrentWithContext(Initializable):
     def __init__(self, representation_dim, *args, **kwargs):
         self.gated_recurrent = GatedRecurrent(*args, **kwargs)
@@ -55,6 +69,7 @@ class GatedRecurrentWithContext(Initializable):
         kwargs['inputs'] += transition_context
         kwargs['update_inputs'] += update_context
         kwargs['reset_inputs'] += reset_context
+
         # readout_context was only added for the Readout brick, discard it
         kwargs.pop('readout_context')
         return self.gated_recurrent.apply(*args, **kwargs)
@@ -125,31 +140,31 @@ class Encoder(Initializable):
 
 
 class BidirectionalEncoder(Initializable):
-    def __init__(self, vocab_size, embedding_dim, state_dim, reverse=True,
-                 **kwargs):
+    def __init__(self, vocab_size, embedding_dim, state_dim, **kwargs):
         super(BidirectionalEncoder, self).__init__(**kwargs)
-        bidir = Bidirectional(
-            GatedRecurrent(state_dim, activation=Tanh()))
-        fork = Fork([name for name in bidir.prototype.apply.sequences
-                     if name != 'mask'], prototype=Linear())
-        self.lookup = LookupTable(name='embeddings')
-
         self.vocab_size = vocab_size
         self.embedding_dim = embedding_dim
         self.state_dim = state_dim
-        self.reverse = reverse
-        self.transition = bidir
-        self.fork = fork
-        self.children = [self.lookup, self.transition, self.fork]
 
-        self.fork.input_dim = self.embedding_dim
-        self.fork.output_dims = [self.state_dim
-                                 for _ in self.fork.output_names]
+        self.lookup = LookupTable(name='embeddings')
+        self.bidir = BidirectionalWMT15(GatedRecurrent(activation=Tanh(), dim=state_dim))
+        self.fwd_fork = Fork([name for name in self.bidir.prototype.apply.sequences
+                          if name != 'mask'], prototype=Linear(), name='fwd_fork')
+        self.back_fork = Fork([name for name in self.bidir.prototype.apply.sequences
+                          if name != 'mask'], prototype=Linear(), name='back_fork')
+
+        self.children = [self.lookup, self.bidir, self.fwd_fork, self.back_fork]
 
     def _push_allocation_config(self):
         self.lookup.length = self.vocab_size
         self.lookup.dim = self.embedding_dim
-        self.transition.dim = self.state_dim
+
+        self.fwd_fork.input_dim = self.embedding_dim
+        self.fwd_fork.output_dims = [self.state_dim
+                                 for _ in self.fwd_fork.output_names]
+        self.back_fork.input_dim = self.embedding_dim
+        self.back_fork.output_dims = [self.state_dim
+                                 for _ in self.back_fork.output_names]
 
     @application(inputs=['source_sentence', 'source_sentence_mask'],
                  outputs=['representation'])
@@ -157,16 +172,15 @@ class BidirectionalEncoder(Initializable):
         # Time as first dimension
         source_sentence = source_sentence.dimshuffle(1, 0)
         source_sentence_mask = source_sentence_mask.T
-        if self.reverse:
-            source_sentence = source_sentence[::-1]
-            source_sentence_mask = source_sentence_mask[::-1]
 
         embeddings = self.lookup.apply(source_sentence)
 
-        representation = self.transition.apply(**merge(
-            self.fork.apply(embeddings, as_dict=True),
-            {'mask': source_sentence_mask}
-        ))
+        representation = self.bidir.apply(
+            merge(self.fwd_fork.apply(embeddings, as_dict=True),
+            {'mask': source_sentence_mask}),
+            merge(self.back_fork.apply(embeddings, as_dict=True),
+            {'mask': source_sentence_mask})
+        )
         return representation
 
 
@@ -299,6 +313,7 @@ if __name__ == "__main__":
     cost = decoder.cost(enc_representation, source_sentence_mask,
                         target_sentence, target_sentence_mask)
 
+    import ipdb;ipdb.set_trace()
     # Initialize model
     encoder.weights_init = decoder.weights_init = IsotropicGaussian(0.1)
     encoder.biases_init = decoder.biases_init = Constant(0)
