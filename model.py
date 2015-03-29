@@ -1,9 +1,6 @@
-# This is the original encoder-decoder model
-# It only works with Blocks PR #414 merged. It seems to train, but
-# I haven't sampled sentences yet
-# TIP: Without CuDNN Theano seems to move part of the step clipping to CPU
-#      on my computer, which makes things very slow. CuDNN gives a 2x speedup
-#      in my case, so it's worth installing.
+# This is the RNNsearch model
+# Works with Blocks commit
+# d9fcdec9f03bff762d9c9f85273dff8ed50a2b19
 from collections import Counter
 import argparse
 import numpy
@@ -24,23 +21,86 @@ from blocks.extensions.saveload import Checkpoint
 from blocks.extensions.plot import Plot
 
 from blocks.bricks import (Tanh, Maxout, Linear, FeedforwardSequence,
-                           Bias, Initializable)
-from blocks.bricks.attention import SequenceContentAttention
+                           Bias, Initializable, MLP)
+from blocks.bricks.attention import (
+    SequenceContentAttention, AttentionRecurrent, FakeAttentionRecurrent)
 from blocks.bricks.base import application
 from blocks.bricks.lookup import LookupTable
-from blocks.bricks.parallel import Fork
+from blocks.bricks.parallel import Fork, Distribute
 from blocks.bricks.recurrent import GatedRecurrent, Bidirectional
 from blocks.bricks.sequence_generators import (
-    LookupFeedback, Readout, SoftmaxEmitter, SequenceGenerator
+    LookupFeedback, Readout, SoftmaxEmitter, BaseSequenceGenerator
 )
 
 from stream import masked_stream
-
 
 # Helper class
 class InitializableFeedforwardSequence(FeedforwardSequence, Initializable):
     pass
 
+class SequenceGenerator(BaseSequenceGenerator):
+    """A more user-friendly interface for BaseSequenceGenerator.
+
+    Parameters
+    ----------
+    readout : instance of :class:`AbstractReadout`
+        The readout component for the sequence generator.
+    transition : instance of :class:`.BaseRecurrent`
+        The recurrent transition to be used in the sequence generator.
+        Will be combined with `attention`, if that one is given.
+    attention : :class:`.Brick`
+        The attention mechanism to be added to ``transition``. Can be
+        ``None``, in which case no attention mechanism is used.
+    add_contexts : bool
+        If ``True``, the :class:`AttentionRecurrent` wrapping the
+        `transition` will add additional contexts for the attended and
+        its mask.
+
+    Notes
+    -----
+    Currently works only with lazy initialization (uses blocks that can not
+    be constructed with a single call).
+
+    """
+    def __init__(self, readout, transition, attention=None,
+                 fork_inputs=None, add_contexts=True, prototype=None, **kwargs):
+        if not fork_inputs:
+            fork_inputs = [name for name in transition.apply.sequences
+                           if name != 'mask']
+
+        fork = Fork(fork_inputs, prototype=prototype)
+        if attention:
+            distribute = Distribute(fork_inputs,
+                                    attention.take_glimpses.outputs[0])
+            transition = AttentionRecurrent(
+                transition, attention, distribute,
+                add_contexts=add_contexts, name="att_trans")
+        else:
+            transition = FakeAttentionRecurrent(transition,
+                                                name="with_fake_attention")
+        super(SequenceGenerator, self).__init__(
+            readout, transition, fork, **kwargs)
+
+class LookupFeedbackWMT15(LookupFeedback):
+
+    @application
+    def feedback(self, outputs):
+        assert self.output_dim == 0
+
+        shp = [outputs.shape[i] for i in xrange(outputs.ndim)]
+        outputs_flat = outputs.flatten()
+
+        lookup_flat = tensor.switch(outputs_flat[:, None] < 0,
+                      tensor.alloc(0., outputs_flat.shape[0], self.feedback_dim),
+                      self.lookup.apply(outputs_flat))
+        lookup = lookup_flat.reshape(shp+[self.feedback_dim])
+        return lookup
+
+class SoftmaxEmitterWMT15(SoftmaxEmitter):
+
+    @application
+    def initial_outputs(self, batch_size, *args, **kwargs):
+        return -tensor.ones((batch_size,), dtype='int64')
 
 class BidirectionalWMT15(Bidirectional):
 
@@ -53,91 +113,6 @@ class BidirectionalWMT15(Bidirectional):
                                            **backward_dict)]
         return [tensor.concatenate([f, b], axis=2)
                 for f, b in equizip(forward, backward)]
-
-
-class GatedRecurrentWithContext(Initializable):
-    def __init__(self, representation_dim, *args, **kwargs):
-        self.gated_recurrent = GatedRecurrent(*args, **kwargs)
-        self.children = [self.gated_recurrent]
-        self.representation_dim = representation_dim
-
-    @application(states=['states'], outputs=['states'],
-                 contexts=['readout_context', 'transition_context',
-                           'update_context', 'reset_context'])
-    def apply(self, transition_context, update_context, reset_context,
-              *args, **kwargs):
-        kwargs['inputs'] += transition_context
-        kwargs['update_inputs'] += update_context
-        kwargs['reset_inputs'] += reset_context
-
-        # readout_context was only added for the Readout brick, discard it
-        kwargs.pop('readout_context')
-        return self.gated_recurrent.apply(*args, **kwargs)
-
-    def get_dim(self, name):
-        if name in ['transition_context', 'update_context', 'reset_context']:
-            return self.dim
-        if name in ['readout_context']:
-            return self.representation_dim
-        return self.gated_recurrent.get_dim(name)
-
-    def __getattr__(self, name):
-        if name == 'gated_recurrent':
-            raise AttributeError
-        return getattr(self.gated_recurrent, name)
-
-    @apply.property('sequences')
-    def apply_inputs(self):
-        sequences = ['mask', 'inputs']
-        if self.use_update_gate:
-            sequences.append('update_inputs')
-        if self.use_reset_gate:
-            sequences.append('reset_inputs')
-        return sequences
-
-
-class Encoder(Initializable):
-    def __init__(self, vocab_size, embedding_dim, state_dim, reverse=True,
-                 **kwargs):
-        super(Encoder, self).__init__(**kwargs)
-        self.vocab_size = vocab_size
-        self.embedding_dim = embedding_dim
-        self.state_dim = state_dim
-        self.reverse = reverse
-
-        self.lookup = LookupTable(name='embeddings')
-        self.transition = GatedRecurrent(state_dim, activation=Tanh(),
-                                         name='encoder_transition')
-        self.fork = Fork([name for name in self.transition.apply.sequences
-                          if name != 'mask'], prototype=Linear())
-
-        self.children = [self.lookup, self.transition, self.fork]
-
-    def _push_allocation_config(self):
-        self.lookup.length = self.vocab_size
-        self.lookup.dim = self.embedding_dim
-        self.transition.dim = self.state_dim
-        self.fork.input_dim = self.embedding_dim
-        self.fork.output_dims = [self.state_dim
-                                 for _ in self.fork.output_names]
-
-    @application(inputs=['source_sentence', 'source_sentence_mask'],
-                 outputs=['representation'])
-    def apply(self, source_sentence, source_sentence_mask):
-        # Time as first dimension
-        source_sentence = source_sentence.dimshuffle(1, 0)
-        source_sentence_mask = source_sentence_mask.T
-        if self.reverse:
-            source_sentence = source_sentence[::-1]
-            source_sentence_mask = source_sentence_mask[::-1]
-
-        embeddings = self.lookup.apply(source_sentence)
-        representation = self.transition.apply(**merge(
-            self.fork.apply(embeddings, as_dict=True),
-            {'mask': source_sentence_mask}
-        ))
-        return representation
-
 
 class BidirectionalEncoder(Initializable):
     def __init__(self, vocab_size, embedding_dim, state_dim, **kwargs):
@@ -183,105 +158,72 @@ class BidirectionalEncoder(Initializable):
         )
         return representation
 
-
 class Decoder(Initializable):
     def __init__(self, vocab_size, embedding_dim, state_dim,
-                 representation_dim, use_attention=False, **kwargs):
+                 representation_dim, **kwargs):
         super(Decoder, self).__init__(**kwargs)
         self.vocab_size = vocab_size
         self.embedding_dim = embedding_dim
         self.state_dim = state_dim
         self.representation_dim = representation_dim
-        self.use_attention = use_attention
 
-        self.transition = GatedRecurrentWithContext(representation_dim,
-                                  state_dim, activation=Tanh(), name='decoder')
-        if self.use_attention:
-            self.attention = SequenceContentAttention(
-                state_names=self.transition.apply.states,
-                attended_dim=representation_dim,
-                match_dim=state_dim, name="attention")
+        self.transition = GatedRecurrent(dim=state_dim, activation=Tanh(), name='decoder')
+        self.attention = SequenceContentAttention(
+            state_names=self.transition.apply.states,
+            attended_dim=representation_dim,
+            match_dim=state_dim, name="attention")
 
         readout = Readout(
-            source_names=['states', 'feedback', 'readout_context'],
+            source_names=['states', 'feedback', self.attention.take_glimpses.outputs[0]],
             readout_dim=self.vocab_size,
-            emitter=SoftmaxEmitter(),
-            feedback_brick=LookupFeedback(vocab_size, embedding_dim),
+            emitter=SoftmaxEmitterWMT15(),
+            feedback_brick=LookupFeedbackWMT15(vocab_size, embedding_dim),
             post_merge=InitializableFeedforwardSequence(
-                [Bias(dim=1000).apply,
+                [Bias(dim=state_dim).apply,
                  Maxout(num_pieces=2).apply,
-                 Linear(input_dim=state_dim / 2, output_dim=100,
+                 Linear(input_dim=state_dim / 2, output_dim=embedding_dim,
                         use_bias=False).apply,
-                 Linear(input_dim=100).apply]),
-            merged_dim=1000)
+                 Linear(input_dim=embedding_dim).apply]),
+            merged_dim=state_dim)
 
-        # Readout will apply the linear transformation to 'readout_context'
-        # with a Merge brick, so no need to fork it here
-        self.fork = Fork([name for name in
-                          self.transition.apply.contexts +
-                          self.transition.apply.states
-                          if name != 'readout_context'], prototype=Linear())
-        self.tanh = Tanh()
+        self.state_init = MLP(activations=[Tanh()], dims=[state_dim, state_dim],
+                              name='state_initializer')
 
         self.sequence_generator = SequenceGenerator(
-            readout=readout, transition=self.transition,
-            attention=self.attention if self.use_attention else None,
+            readout=readout,
+            transition=self.transition,
+            attention=self.attention,
             fork_inputs=[name for name in self.transition.apply.sequences
                          if name != 'mask'],
+            prototype=Linear()
         )
 
-        self.children = [self.fork, self.sequence_generator, self.tanh]
+        self.children = [self.sequence_generator, self.state_init]
 
-    def _push_allocation_config(self):
-        self.fork.input_dim = self.representation_dim
-        self.fork.output_dims = [self.state_dim
-                                 for _ in self.fork.output_names]
-
-    @application(inputs=['representations', 'source_sentence_mask',
+    @application(inputs=['representation', 'source_sentence_mask',
                          'target_sentence_mask', 'target_sentence'],
                  outputs=['cost'])
-    def cost(self, representations, source_sentence_mask,
+    def cost(self, representation, source_sentence_mask,
              target_sentence, target_sentence_mask):
 
         source_sentence_mask = source_sentence_mask.T
         target_sentence = target_sentence.dimshuffle(1, 0)
         target_sentence_mask = target_sentence_mask.T
 
-        # Extract last step of representation if regular enc-dec
-        representation = representations if self.use_attention \
-                            else representations[-1].dimshuffle('x', 0, 1)
-
-        # The initial state and contexts, all functions of the representation
-        contexts = {key: value.dimshuffle('x', 0, 1)
-                    if key not in self.transition.apply.states
-                    and value.ndim == 2 else value
-                    for key, value
-                    in self.fork.apply(representation, as_dict=True).items()}
-        contexts['states'] = self.tanh.apply(contexts['states'])
+        init_states = self.state_init.apply(representation[0, :, -self.state_dim:])
 
         # Get the cost matrix
-        cost = self.sequence_generator.cost_matrix(**merge(
-            contexts, {'mask': target_sentence_mask,
+        cost = self.sequence_generator.cost_matrix(
+                    **{'states':init_states,
+                       'mask': target_sentence_mask,
                        'outputs': target_sentence,
-                       'readout_context': representation,
                        'attended': representation,
                        'attended_mask': source_sentence_mask}
-        ))
+        )
 
-        return (cost * target_sentence_mask).sum() / target_sentence_mask.sum()
-
+        return (cost * target_sentence_mask).sum()
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        "Encoder-Decoder implementation for machine translation.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument(
-        "--bidirectional-enc", default=False, action="store_true",
-        help="Flag to use bidirectional-RNN in the encoder.")
-    parser.add_argument(
-        "--use-attention", default=False, action="store_true",
-        help="Falg to use attention mechanism in the decoder RNN.")
-    args = parser.parse_args()
 
     # Create Theano variables
     source_sentence = tensor.lmatrix('english')
@@ -299,50 +241,17 @@ if __name__ == "__main__":
         numpy.random.rand(10, 10).astype('float32')
 
     # Construct model
-    if args.bidirectional_enc:
-        encoder = BidirectionalEncoder(30000, 100, 1000)
-        decoder = Decoder(30000, 100, 1000, 1000*2,
-                          use_attention=args.use_attention)
-    else:
-        encoder = Encoder(30000, 100, 1000)
-        decoder = Decoder(30000, 100, 1000, 1000,
-                          use_attention=args.use_attention)
-
-    # Get Cost
-    enc_representation = encoder.apply(source_sentence, source_sentence_mask)
-    cost = decoder.cost(enc_representation, source_sentence_mask,
+    encoder = BidirectionalEncoder(30000, 100, 1000)
+    decoder = Decoder(30000, 100, 1000, 1000)
+    cost = decoder.cost(encoder.apply(source_sentence, source_sentence_mask),
                         target_sentence, target_sentence_mask)
 
-    import ipdb;ipdb.set_trace()
     # Initialize model
     encoder.weights_init = decoder.weights_init = IsotropicGaussian(0.1)
     encoder.biases_init = decoder.biases_init = Constant(0)
     encoder.push_initialization_config()
     decoder.push_initialization_config()
     encoder.bidir.prototype.weights_init = Orthogonal()
-    decoder.transition.weights_init = Orthogonal()
-    encoder.initialize()
-    decoder.initialize()
-
-    f = theano.function([source_sentence, source_sentence_mask],
-                        enc_representation)
-    g = theano.function([source_sentence, source_sentence_mask,
-                         target_sentence, target_sentence_mask], cost)
-    s_ = numpy.random.randint(10, size=(5, 10))
-    ms_ = numpy.random.rand(5, 10).astype('float32')
-    t_ = numpy.random.randint(10, size=(5, 10))
-    mt_ = numpy.random.rand(5, 10).astype('float32')
-
-    enc_out = f(s_, ms_)
-    dec_out = g(s_, ms_, t_, mt_)
-
-    '''
-    # Initialize model
-    encoder.weights_init = decoder.weights_init = IsotropicGaussian(0.1)
-    encoder.biases_init = decoder.biases_init = Constant(0)
-    encoder.push_initialization_config()
-    decoder.push_initialization_config()
-    encoder.transition.weights_init = Orthogonal()
     decoder.transition.weights_init = Orthogonal()
     encoder.initialize()
     decoder.initialize()
@@ -367,12 +276,11 @@ if __name__ == "__main__":
         algorithm=algorithm,
         data_stream=masked_stream,
         extensions=[
-            TrainingDataMonitoring([cost], after_batch=True),
+            TrainingDataMonitoring([cost], after_every_batch=True),
             Plot('En-Fr', channels=[['decoder_cost_cost']],
-                 after_batch=True),
-            Printing(after_batch=True),
+                 after_every_batch=True),
+            Printing(after_every_batch=True),
             Checkpoint('model.pkl', every_n_batches=2048)
         ]
     )
     main_loop.run()
-    '''
