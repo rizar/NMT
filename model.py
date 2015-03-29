@@ -22,14 +22,14 @@ from blocks.extensions.plot import Plot
 
 from blocks.bricks import (Tanh, Maxout, Linear, FeedforwardSequence,
                            Bias, Initializable, MLP)
-from blocks.bricks.attention import (
-    SequenceContentAttention, AttentionRecurrent, FakeAttentionRecurrent)
+from blocks.bricks.attention import SequenceContentAttention, AttentionRecurrent
 from blocks.bricks.base import application
 from blocks.bricks.lookup import LookupTable
 from blocks.bricks.parallel import Fork, Distribute
 from blocks.bricks.recurrent import GatedRecurrent, Bidirectional
 from blocks.bricks.sequence_generators import (
-    LookupFeedback, Readout, SoftmaxEmitter, BaseSequenceGenerator
+    LookupFeedback, Readout, SoftmaxEmitter,
+    BaseSequenceGenerator, FakeAttentionRecurrent
 )
 
 from stream import masked_stream
