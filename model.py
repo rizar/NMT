@@ -242,7 +242,7 @@ if __name__ == "__main__":
 
     # Construct model
     encoder = BidirectionalEncoder(30000, 100, 1000)
-    decoder = Decoder(30000, 100, 1000, 1000)
+    decoder = Decoder(30000, 100, 1000, 2000)
     cost = decoder.cost(encoder.apply(source_sentence, source_sentence_mask),
                         target_sentence, target_sentence_mask)
 
