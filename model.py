@@ -89,10 +89,12 @@ class LookupFeedbackWMT15(LookupFeedback):
 
         shp = [outputs.shape[i] for i in xrange(outputs.ndim)]
         outputs_flat = outputs.flatten()
+        outputs_flat_zeros = tensor.switch(outputs_flat < 0, 0,
+                                           outputs_flat)
 
         lookup_flat = tensor.switch(outputs_flat[:, None] < 0,
                       tensor.alloc(0., outputs_flat.shape[0], self.feedback_dim),
-                      self.lookup.apply(outputs_flat))
+                      self.lookup.apply(outputs_flat_zeros))
         lookup = lookup_flat.reshape(shp+[self.feedback_dim])
         return lookup
 
@@ -145,7 +147,7 @@ class BidirectionalEncoder(Initializable):
                  outputs=['representation'])
     def apply(self, source_sentence, source_sentence_mask):
         # Time as first dimension
-        source_sentence = source_sentence.dimshuffle(1, 0)
+        source_sentence = source_sentence.T
         source_sentence_mask = source_sentence_mask.T
 
         embeddings = self.lookup.apply(source_sentence)
@@ -207,7 +209,7 @@ class Decoder(Initializable):
              target_sentence, target_sentence_mask):
 
         source_sentence_mask = source_sentence_mask.T
-        target_sentence = target_sentence.dimshuffle(1, 0)
+        target_sentence = target_sentence.T
         target_sentence_mask = target_sentence_mask.T
 
         init_states = self.state_init.apply(representation[0, :, -self.state_dim:])
