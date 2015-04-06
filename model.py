@@ -11,6 +11,7 @@ from picklable_itertools.extras import equizip
 
 from blocks.algorithms import (GradientDescent, StepClipping, AdaDelta,
                                CompositeRule)
+from blocks.filter import VariableFilter
 from blocks.main_loop import MainLoop
 from blocks.model import Model
 from blocks.graph import ComputationGraph
@@ -22,64 +23,24 @@ from blocks.extensions.plot import Plot
 
 from blocks.bricks import (Tanh, Maxout, Linear, FeedforwardSequence,
                            Bias, Initializable, MLP)
-from blocks.bricks.attention import SequenceContentAttention, AttentionRecurrent
+from blocks.bricks.attention import SequenceContentAttention
 from blocks.bricks.base import application
 from blocks.bricks.lookup import LookupTable
-from blocks.bricks.parallel import Fork, Distribute
+from blocks.bricks.parallel import Fork
 from blocks.bricks.recurrent import GatedRecurrent, Bidirectional
 from blocks.bricks.sequence_generators import (
     LookupFeedback, Readout, SoftmaxEmitter,
-    BaseSequenceGenerator, FakeAttentionRecurrent
+    SequenceGenerator
 )
 
-from stream import masked_stream
+from stream import masked_stream, state, dev_stream
+from sampling import BleuValidator
+
 
 # Helper class
 class InitializableFeedforwardSequence(FeedforwardSequence, Initializable):
     pass
 
-class SequenceGenerator(BaseSequenceGenerator):
-    """A more user-friendly interface for BaseSequenceGenerator.
-
-    Parameters
-    ----------
-    readout : instance of :class:`AbstractReadout`
-        The readout component for the sequence generator.
-    transition : instance of :class:`.BaseRecurrent`
-        The recurrent transition to be used in the sequence generator.
-        Will be combined with `attention`, if that one is given.
-    attention : :class:`.Brick`
-        The attention mechanism to be added to ``transition``. Can be
-        ``None``, in which case no attention mechanism is used.
-    add_contexts : bool
-        If ``True``, the :class:`AttentionRecurrent` wrapping the
-        `transition` will add additional contexts for the attended and
-        its mask.
-
-    Notes
-    -----
-    Currently works only with lazy initialization (uses blocks that can not
-    be constructed with a single call).
-
-    """
-    def __init__(self, readout, transition, attention=None,
-                 fork_inputs=None, add_contexts=True, prototype=None, **kwargs):
-        if not fork_inputs:
-            fork_inputs = [name for name in transition.apply.sequences
-                           if name != 'mask']
-
-        fork = Fork(fork_inputs, prototype=prototype)
-        if attention:
-            distribute = Distribute(fork_inputs,
-                                    attention.take_glimpses.outputs[0])
-            transition = AttentionRecurrent(
-                transition, attention, distribute,
-                add_contexts=add_contexts, name="att_trans")
-        else:
-            transition = FakeAttentionRecurrent(transition,
-                                                name="with_fake_attention")
-        super(SequenceGenerator, self).__init__(
-            readout, transition, fork, **kwargs)
 
 class LookupFeedbackWMT15(LookupFeedback):
 
@@ -98,11 +59,13 @@ class LookupFeedbackWMT15(LookupFeedback):
         lookup = lookup_flat.reshape(shp+[self.feedback_dim])
         return lookup
 
+
 class SoftmaxEmitterWMT15(SoftmaxEmitter):
 
     @application
     def initial_outputs(self, batch_size, *args, **kwargs):
         return -tensor.ones((batch_size,), dtype='int64')
+
 
 class BidirectionalWMT15(Bidirectional):
 
@@ -115,6 +78,7 @@ class BidirectionalWMT15(Bidirectional):
                                            **backward_dict)]
         return [tensor.concatenate([f, b], axis=2)
                 for f, b in equizip(forward, backward)]
+
 
 class BidirectionalEncoder(Initializable):
     def __init__(self, vocab_size, embedding_dim, state_dim, **kwargs):
@@ -159,6 +123,7 @@ class BidirectionalEncoder(Initializable):
             {'mask': source_sentence_mask})
         )
         return representation
+
 
 class Decoder(Initializable):
     def __init__(self, vocab_size, embedding_dim, state_dim,
@@ -225,6 +190,17 @@ class Decoder(Initializable):
 
         return (cost * target_sentence_mask).sum()
 
+    @application
+    def generate(self, source_sentence, representation):
+        init_states = self.state_init.apply(representation[0, :, -self.state_dim:])
+        return self.sequence_generator.generate(
+            n_steps=2 * source_sentence.shape[0],
+            batch_size=source_sentence.shape[1],
+            states=init_states,
+            attended=representation,
+            attended_mask=tensor.ones(source_sentence.shape).T)
+
+
 if __name__ == "__main__":
 
     # Create Theano variables
@@ -232,6 +208,7 @@ if __name__ == "__main__":
     source_sentence_mask = tensor.matrix('english_mask')
     target_sentence = tensor.lmatrix('french')
     target_sentence_mask = tensor.matrix('french_mask')
+    sampling_input = tensor.lmatrix('input')
 
     # Test values
     theano.config.compute_test_value = 'warn'
@@ -241,12 +218,15 @@ if __name__ == "__main__":
         numpy.random.rand(10, 10).astype('float32')
     target_sentence_mask.tag.test_value = \
         numpy.random.rand(10, 10).astype('float32')
+    sampling_input.tag.test_value = numpy.random.randint(10, size=(10, 10))
 
     # Construct model
-    encoder = BidirectionalEncoder(30000, 100, 1000)
-    decoder = Decoder(30000, 100, 1000, 2000)
+    encoder = BidirectionalEncoder(state['src_vocab_size'], state['enc_embed'],
+                                   state['enc_nhids'])
+    decoder = Decoder(state['trg_vocab_size'], state['dec_embed'],
+                      state['dec_nhids'], state['enc_nhids'] * 2)
     cost = decoder.cost(encoder.apply(source_sentence, source_sentence_mask),
-                        target_sentence, target_sentence_mask)
+                        source_sentence_mask, target_sentence, target_sentence_mask)
 
     # Initialize model
     encoder.weights_init = decoder.weights_init = IsotropicGaussian(0.1)
@@ -272,17 +252,36 @@ if __name__ == "__main__":
         step_rule=CompositeRule([StepClipping(10), AdaDelta()])
     )
 
+    # Set up beam search
+    sampling_encoder = BidirectionalEncoder(state['src_vocab_size'], state['enc_embed'],
+                                            state['enc_nhids'])
+    sampling_decoder = Decoder(state['trg_vocab_size'], state['dec_embed'],
+                               state['dec_nhids'], state['enc_nhids'] * 2)
+    sampling_encoder.weights_init = sampling_decoder.weights_init = Constant(0)
+    sampling_encoder.biases_init = sampling_decoder.biases_init = Constant(0)
+    sampling_representation = sampling_encoder.apply(sampling_input,
+                                                     tensor.ones(sampling_input.shape))
+    generated = sampling_decoder.generate(sampling_input, sampling_representation)
+    search_model = Model(generated)
+    samples, = VariableFilter(
+        bricks=[sampling_decoder.sequence_generator], name="outputs")(
+            ComputationGraph(generated[1]))  # generated[1] is the next_outputs
+
     # Train!
     main_loop = MainLoop(
         model=Model(cost),
         algorithm=algorithm,
         data_stream=masked_stream,
         extensions=[
-            TrainingDataMonitoring([cost], after_every_batch=True),
-            Plot('En-Fr', channels=[['decoder_cost_cost']],
-                 after_every_batch=True),
-            Printing(after_every_batch=True),
-            Checkpoint('model.pkl', every_n_batches=2048)
+            BleuValidator(sampling_input, samples=samples, model=search_model,
+                          state=state, data_stream=dev_stream,
+                          every_n_batches=state['bleu_val_freq']),
+            TrainingDataMonitoring([cost], after_batch=True),
+            #Plot('En-Fr', channels=[['decoder_cost_cost']],
+            #     after_batch=True),
+            Printing(after_batch=True),
+            Checkpoint(state['prefix'] + '_model.pkl',
+                       every_n_batches=state['save_freq'])
         ]
     )
     main_loop.run()
