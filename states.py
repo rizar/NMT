@@ -54,9 +54,14 @@ def get_states_wmt15_fi_en_40k():
 
     # Timing related
     state['reload'] = True
-    state['save_freq'] = 10
-    state['bleu_val_freq'] = 2
+    state['save_freq'] = 1
+    state['sampling_freq'] = 3
+    state['bleu_val_freq'] = 5
     state['val_burn_in'] = 2
+
+    # Monitoring related
+    state['hook_samples'] = 3
+    state['hook_examples'] = 3
 
     return state
 
