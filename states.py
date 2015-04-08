@@ -1,30 +1,16 @@
-import collections
 
-class ReadonlyDict(collections.Mapping):
-
-    __state = None
-
-    def __init__(self, f):
-        self.__state = f
-
-    def __call__(self):
-        self._data = self.__state()
-        return self
-
-    def __getitem__(self, key):
-        return self._data[key]
-
-    def __len__(self):
-        return len(self._data)
-
-    def __iter__(self):
-        return iter(self._data)
+class ReadOnlyDict(dict):
 
     def __setitem__(self, key, value):
-        raise TypeError("Readonly dictionary does not support __setitem__")
+        raise(TypeError, "__setitem__ is not supported")
+
+    def __delitem__(self, key):
+        raise(TypeError, "__delitem__ is not supported")
+
+    def update(self, d):
+        raise(TypeError, "update is not supported")
 
 
-@ReadonlyDict
 def get_states_wmt15_fi_en_40k():
     state = {}
 
@@ -54,10 +40,14 @@ def get_states_wmt15_fi_en_40k():
 
     # Timing related
     state['reload'] = True
-    state['save_freq'] = 10
-    state['bleu_val_freq'] = 2
+    state['save_freq'] = 1
+    state['sampling_freq'] = 3
+    state['bleu_val_freq'] = 5
     state['val_burn_in'] = 2
 
-    return state
+    # Monitoring related
+    state['hook_samples'] = 3
+
+    return ReadOnlyDict(state)
 
 

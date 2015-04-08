@@ -34,7 +34,7 @@ from blocks.bricks.sequence_generators import (
 )
 
 from stream import masked_stream, state, dev_stream
-from sampling import BleuValidator
+from sampling import BleuValidator, Sampler
 
 
 # Helper class
@@ -192,10 +192,13 @@ class Decoder(Initializable):
 
     @application
     def generate(self, source_sentence, representation):
+
+        # TODO: Check this
         init_states = self.state_init.apply(representation[0, :, -self.state_dim:])
+
         return self.sequence_generator.generate(
-            n_steps=2 * source_sentence.shape[0],
-            batch_size=source_sentence.shape[1],
+            n_steps=2 * source_sentence.shape[1],
+            batch_size=source_sentence.shape[0],
             states=init_states,
             attended=representation,
             attended_mask=tensor.ones(source_sentence.shape).T)
@@ -211,6 +214,7 @@ if __name__ == "__main__":
     sampling_input = tensor.lmatrix('input')
 
     # Test values
+    '''
     theano.config.compute_test_value = 'warn'
     source_sentence.tag.test_value = numpy.random.randint(10, size=(10, 10))
     target_sentence.tag.test_value = numpy.random.randint(10, size=(10, 10))
@@ -219,6 +223,7 @@ if __name__ == "__main__":
     target_sentence_mask.tag.test_value = \
         numpy.random.rand(10, 10).astype('float32')
     sampling_input.tag.test_value = numpy.random.randint(10, size=(10, 10))
+    '''
 
     # Construct model
     encoder = BidirectionalEncoder(state['src_vocab_size'], state['enc_embed'],
@@ -273,8 +278,10 @@ if __name__ == "__main__":
         algorithm=algorithm,
         data_stream=masked_stream,
         extensions=[
-            BleuValidator(sampling_input, samples=samples, model=search_model,
-                          state=state, data_stream=dev_stream,
+            Sampler(model=search_model, state=state, data_stream=masked_stream,
+                    every_n_batches=state['sampling_freq']),
+            BleuValidator(sampling_input, samples=samples, state=state,
+                          model=search_model, data_stream=dev_stream,
                           every_n_batches=state['bleu_val_freq']),
             TrainingDataMonitoring([cost], after_batch=True),
             #Plot('En-Fr', channels=[['decoder_cost_cost']],
