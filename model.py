@@ -4,6 +4,7 @@
 from collections import Counter
 import argparse
 import numpy
+import os
 import theano
 from theano import tensor
 from toolz import merge
@@ -11,6 +12,7 @@ from picklable_itertools.extras import equizip
 
 from blocks.algorithms import (GradientDescent, StepClipping, AdaDelta,
                                CompositeRule)
+from blocks.dump import load_parameter_values
 from blocks.filter import VariableFilter
 from blocks.main_loop import MainLoop
 from blocks.model import Model
@@ -18,7 +20,7 @@ from blocks.graph import ComputationGraph
 from blocks.initialization import IsotropicGaussian, Orthogonal, Constant
 from blocks.extensions import Printing
 from blocks.extensions.monitoring import TrainingDataMonitoring
-from blocks.extensions.saveload import Checkpoint
+from blocks.extensions.saveload import Checkpoint, LoadFromDump
 from blocks.extensions.plot import Plot
 
 from blocks.bricks import (Tanh, Maxout, Linear, FeedforwardSequence,
@@ -181,7 +183,7 @@ class Decoder(Initializable):
 
         # Get the cost matrix
         cost = self.sequence_generator.cost_matrix(
-                    **{'states':init_states,
+                    **{'states': init_states,
                        'mask': target_sentence_mask,
                        'outputs': target_sentence,
                        'attended': representation,
@@ -193,7 +195,7 @@ class Decoder(Initializable):
     @application
     def generate(self, source_sentence, representation):
 
-        # TODO: Check this
+        # TODO: Check this, seems OK
         init_states = self.state_init.apply(representation[0, :, -self.state_dim:])
 
         return self.sequence_generator.generate(
@@ -254,30 +256,45 @@ if __name__ == "__main__":
     # Set up training algorithm
     algorithm = GradientDescent(
         cost=cost, params=cg.parameters,
-        step_rule=CompositeRule([StepClipping(10), AdaDelta()])
+        step_rule=CompositeRule([StepClipping(state['step_clipping']),
+                                 eval(state['step_rule'])()])
     )
 
     # Set up beam search
-    sampling_encoder = BidirectionalEncoder(state['src_vocab_size'], state['enc_embed'],
-                                            state['enc_nhids'])
+    sampling_encoder = BidirectionalEncoder(
+        state['src_vocab_size'], state['enc_embed'], state['enc_nhids'])
     sampling_decoder = Decoder(state['trg_vocab_size'], state['dec_embed'],
                                state['dec_nhids'], state['enc_nhids'] * 2)
     sampling_encoder.weights_init = sampling_decoder.weights_init = Constant(0)
     sampling_encoder.biases_init = sampling_decoder.biases_init = Constant(0)
-    sampling_representation = sampling_encoder.apply(sampling_input,
-                                                     tensor.ones(sampling_input.shape))
-    generated = sampling_decoder.generate(sampling_input, sampling_representation)
+    sampling_representation = sampling_encoder.apply(
+        sampling_input, tensor.ones(sampling_input.shape))
+    generated = sampling_decoder.generate(
+        sampling_input, sampling_representation)
     search_model = Model(generated)
     samples, = VariableFilter(
         bricks=[sampling_decoder.sequence_generator], name="outputs")(
             ComputationGraph(generated[1]))  # generated[1] is the next_outputs
 
+    # Set up training model
+    training_model = Model(cost)
+
+    # Reload model
+    # TODO: This is buggy itself in blocks currently
+    '''
+    import ipdb;ipdb.set_trace()
+    file_to_load = state['prefix'] + 'model.pkl'
+    if state['reload'] and os.path.isfile(file_to_load):
+        training_model.set_param_values(load_parameter_values(file_to_load))
+    '''
+
     # Train!
     main_loop = MainLoop(
-        model=Model(cost),
+        model=training_model,
         algorithm=algorithm,
         data_stream=masked_stream,
         extensions=[
+            LoadFromDump(state['prefix'] + 'model.pkl'),
             Sampler(model=search_model, state=state, data_stream=masked_stream,
                     every_n_batches=state['sampling_freq']),
             BleuValidator(sampling_input, samples=samples, state=state,
@@ -287,7 +304,7 @@ if __name__ == "__main__":
             #Plot('En-Fr', channels=[['decoder_cost_cost']],
             #     after_batch=True),
             Printing(after_batch=True),
-            Checkpoint(state['prefix'] + '_model.pkl',
+            Checkpoint(state['prefix'] + 'model.pkl',
                        every_n_batches=state['save_freq'])
         ]
     )

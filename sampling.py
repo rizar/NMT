@@ -262,6 +262,9 @@ class BleuValidator(SimpleExtension):
         seq[-1] = self.eos_idx
         return seq
 
+    def _idx_to_word(self, seq, ivocab):
+        return " ".join([ivocab.get(idx, "<UNK>") for idx in seq])
+
 
 class ModelInfo:
     def __init__(self, bleu_score, path=None):

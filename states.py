@@ -24,12 +24,19 @@ def get_states_wmt15_fi_en_40k():
 
     # Optimization related
     state['batch_size'] = 64
+    state['step_rule'] = 'AdaDelta'
+    state['step_clipping'] = 10
+
+    # Regularization related
+    state['weight_noise_ff'] = False
+    state['weight_noise_rec'] = False
+    state['dropout'] = 1.0
 
     # Vocabulary related
     state['src_vocab_size'] = 250
     state['trg_vocab_size'] = 250
 
-    # Bleu related
+    # Early stopping based on bleu related
     state['normalized_bleu'] = True
     state['bleu_script'] = '/data/lisatmp3/firatorh/turkishParallelCorpora/iwslt14/scripts/multi-bleu.perl'
     state['val_set'] = '/data/lisatmp3/firatorh/nmt/wmt15/data/fi-en/dev/newsdev2015.tok.seg.fi'
@@ -41,12 +48,12 @@ def get_states_wmt15_fi_en_40k():
     # Timing related
     state['reload'] = True
     state['save_freq'] = 1
-    state['sampling_freq'] = 3
-    state['bleu_val_freq'] = 5
-    state['val_burn_in'] = 2
+    state['sampling_freq'] = 5
+    state['bleu_val_freq'] = 10
+    state['val_burn_in'] = 0
 
     # Monitoring related
-    state['hook_samples'] = 3
+    state['hook_samples'] = 1
 
     return ReadOnlyDict(state)
 
