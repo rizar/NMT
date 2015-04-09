@@ -24,6 +24,7 @@ def get_states_wmt15_fi_en_40k():
 
     # Optimization related
     state['batch_size'] = 64
+    state['sort_k_batches'] = 12
     state['step_rule'] = 'AdaDelta'
     state['step_clipping'] = 10
 
@@ -35,6 +36,7 @@ def get_states_wmt15_fi_en_40k():
     # Vocabulary related
     state['src_vocab_size'] = 250
     state['trg_vocab_size'] = 250
+    state['unk_id'] = 1
 
     # Early stopping based on bleu related
     state['normalized_bleu'] = True

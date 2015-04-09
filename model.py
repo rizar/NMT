@@ -35,7 +35,7 @@ from blocks.bricks.sequence_generators import (
     SequenceGenerator
 )
 
-from stream import masked_stream, state, dev_stream
+from stream_fi_en import masked_stream, state, dev_stream
 from sampling import BleuValidator, Sampler
 
 
@@ -162,9 +162,8 @@ class Decoder(Initializable):
             readout=readout,
             transition=self.transition,
             attention=self.attention,
-            fork_inputs=[name for name in self.transition.apply.sequences
-                         if name != 'mask'],
-            prototype=Linear()
+            fork=Fork([name for name in self.transition.apply.sequences
+                       if name != 'mask'], prototype=Linear())
         )
 
         self.children = [self.sequence_generator, self.state_init]
@@ -209,10 +208,10 @@ class Decoder(Initializable):
 if __name__ == "__main__":
 
     # Create Theano variables
-    source_sentence = tensor.lmatrix('english')
-    source_sentence_mask = tensor.matrix('english_mask')
-    target_sentence = tensor.lmatrix('french')
-    target_sentence_mask = tensor.matrix('french_mask')
+    source_sentence = tensor.lmatrix('finnish')
+    source_sentence_mask = tensor.matrix('finnish_mask')
+    target_sentence = tensor.lmatrix('english')
+    target_sentence_mask = tensor.matrix('english_mask')
     sampling_input = tensor.lmatrix('input')
 
     # Test values
