@@ -294,7 +294,7 @@ if __name__ == "__main__":
         algorithm=algorithm,
         data_stream=masked_stream,
         extensions=[
-            LoadFromDump(state['prefix'] + 'model.pkl'),
+            #LoadFromDump(state['prefix'] + 'model.pkl'),
             Sampler(model=search_model, state=state, data_stream=masked_stream,
                     every_n_batches=state['sampling_freq']),
             BleuValidator(sampling_input, samples=samples, state=state,
