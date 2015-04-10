@@ -13,25 +13,34 @@ from picklable_itertools import chain, izip, imap, repeat
 from fuel import config
 from fuel.datasets import TextFile
 from fuel.schemes import ConstantScheme
-from fuel.transformers import Merge, Batch, Filter, Padding
+from fuel.streams import DataStream
+from fuel.transformers import Merge, Batch, Filter, Padding, Mapping
+
+from states import get_states_wmt15_fi_en_40k
+
+state = get_states_wmt15_fi_en_40k()
 
 en_vocab, fr_vocab = [os.path.join(config.data_path, 'mt',
-                                   '{}_vocab_clean_30000.pkl'.format(lang))
+                                   'vocab.{}.pkl'.format(lang))
                       for lang in ['en', 'fr']]
 
-sources = ['commoncrawl.fr-en',
-           'news-commentary-v10.fr-en',
-           'giga-fren.release2',
-           'training/europarl-v7.fr-en',
-           'un/undoc.2000.fr-en']
-
 en_files = [os.path.join(config.data_path, 'mt',
-                         source + '.token.true.clean.en')
-            for source in sources]
+                         'all.tok.clean.fr-en.en')]
 
 fr_files = [os.path.join(config.data_path, 'mt',
-                         source + '.token.true.clean.fr')
-            for source in sources]
+                         'all.tok.clean.fr-en.fr')]
+
+dev_file = os.path.join(config.data_path, 'mt', 'dev.tok.clean.fr-en.en')
+
+
+def _oov_to_unk(sentence_pair, src_vocab_size=state['src_vocab_size'],
+               trg_vocab_size=state['trg_vocab_size'], unk_id=1):
+    return ([x if x < src_vocab_size else unk_id for x in sentence_pair[0]],
+            [x if x < trg_vocab_size else unk_id for x in sentence_pair[1]])
+
+
+def too_long(sentence_pair):
+    return all([len(sentence) < state['seq_len'] for sentence in sentence_pair])
 
 
 class CycleTextFile(TextFile):
@@ -49,10 +58,11 @@ stream = Merge([en_dataset.get_example_stream(),
                 fr_dataset.get_example_stream()],
                ('english', 'french'))
 
-
-def too_long(sentence_pair):
-    return all([len(sentence) < 50 for sentence in sentence_pair])
+dev_dataset = TextFile([dev_file], cPickle.load(open(en_vocab)), None)
+dev_stream = DataStream(dev_dataset)
 
 filtered_stream = Filter(stream, predicate=too_long)
-batched_stream = Batch(filtered_stream, iteration_scheme=ConstantScheme(64))
+filtered_stream = Mapping(filtered_stream, _oov_to_unk)
+batched_stream = Batch(filtered_stream,
+        iteration_scheme=ConstantScheme(state['batch_size']))
 masked_stream = Padding(batched_stream)
