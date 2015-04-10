@@ -1,6 +1,6 @@
 # This is the RNNsearch model
 # Works with Blocks commit
-# d9fcdec9f03bff762d9c9f85273dff8ed50a2b19
+# 7a8bb2f8d20828568aa509c1b9ae6918bcd04129
 from collections import Counter
 import argparse
 import numpy
