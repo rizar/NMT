@@ -72,6 +72,11 @@ class LargeVocabulary(TrainingExtension):
         self.trg_name = trg_name
 
     def get_related(self, parameter):
+        """
+        Get shared variables related to some parameter.
+        WARNING: There are probably corner cases where this
+        will fail.
+        """
 
         related = [parameter]
         tmp_cg = ComputationGraph(self.main_loop.algorithm.steps[parameter])
@@ -80,7 +85,8 @@ class LargeVocabulary(TrainingExtension):
             isinstance(v, theano.tensor.sharedvar.TensorSharedVariable) and
             v.get_value().shape == parameter.get_value().shape):
                 related.append(v)
-        assert len(related) == 3
+        logger.info("len(related) is : %i" % len(related))
+        # For adadelta, this should be 3
         return related
 
     def invert_dict(self, d):
