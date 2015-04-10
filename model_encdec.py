@@ -182,7 +182,7 @@ class Decoder(Initializable):
                        'readout_context': representation.dimshuffle('x', 0, 1)}
         ))
 
-        return (cost * target_sentence_mask).sum() / target_sentence_mask.sum()
+        return (cost * target_sentence_mask).sum() / target_sentence_mask.shape[1]
 
 
 if __name__ == "__main__":

@@ -189,7 +189,7 @@ class Decoder(Initializable):
                        'attended_mask': source_sentence_mask}
         )
 
-        return (cost * target_sentence_mask).sum()
+        return (cost * target_sentence_mask).sum() / target_sentence_mask.shape[1]
 
     @application
     def generate(self, source_sentence, representation):
