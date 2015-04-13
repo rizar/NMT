@@ -16,7 +16,7 @@ from blocks.dump import load_parameter_values
 from blocks.filter import VariableFilter
 from blocks.main_loop import MainLoop
 from blocks.model import Model
-from blocks.graph import ComputationGraph
+from blocks.graph import ComputationGraph, apply_dropout, apply_noise
 from blocks.initialization import IsotropicGaussian, Orthogonal, Constant
 from blocks.extensions import Printing
 from blocks.extensions.monitoring import TrainingDataMonitoring
@@ -34,6 +34,7 @@ from blocks.bricks.sequence_generators import (
     LookupFeedback, Readout, SoftmaxEmitter,
     SequenceGenerator
 )
+from blocks.select import Selector
 
 from stream_fi_en import masked_stream, state, dev_stream
 from sampling import BleuValidator, Sampler
@@ -149,7 +150,7 @@ class Decoder(Initializable):
             feedback_brick=LookupFeedbackWMT15(vocab_size, embedding_dim),
             post_merge=InitializableFeedforwardSequence(
                 [Bias(dim=state_dim).apply,
-                 Maxout(num_pieces=2).apply,
+                 Maxout(num_pieces=2, name='decoder_maxout_for_dropout').apply,
                  Linear(input_dim=state_dim / 2, output_dim=embedding_dim,
                         use_bias=False).apply,
                  Linear(input_dim=embedding_dim).apply]),
@@ -234,8 +235,27 @@ if __name__ == "__main__":
     cost = decoder.cost(encoder.apply(source_sentence, source_sentence_mask),
                         source_sentence_mask, target_sentence, target_sentence_mask)
 
+    cg = ComputationGraph(cost)
+
+    # apply regularizations
+    if state['dropout'] < 1.0:
+        # dropout is applied to the output of maxout in ghog
+        dropout_inputs = [x for x in cg.intermediary_variables
+                          if x.name == 'decoder_maxout_for_dropout_apply_output']
+        cg = apply_dropout(cg, dropout_inputs, state['dropout'])
+
+    if state['weight_noise_ff'] > 0.0:
+        enc_params = Selector(encoder.lookup).get_params().values()
+        enc_params += Selector(encoder.fwd_fork).get_params().values()
+        enc_params += Selector(encoder.back_fork).get_params().values()
+        dec_params = Selector(decoder.sequence_generator.readout).get_params().values()
+        dec_params += Selector(decoder.sequence_generator.fork).get_params().values()
+        dec_params += Selector(decoder.state_init).get_params().values()
+        cg = apply_noise(cg, enc_params+dec_params, state['weight_noise_ff'])
+
     # Initialize model
-    encoder.weights_init = decoder.weights_init = IsotropicGaussian(0.1)
+    encoder.weights_init = decoder.weights_init = \
+        IsotropicGaussian(state['weight_scale'])
     encoder.biases_init = decoder.biases_init = Constant(0)
     encoder.push_initialization_config()
     decoder.push_initialization_config()
@@ -243,8 +263,6 @@ if __name__ == "__main__":
     decoder.transition.weights_init = Orthogonal()
     encoder.initialize()
     decoder.initialize()
-
-    cg = ComputationGraph(cost)
 
     # Print shapes
     shapes = [param.get_value().shape for param in cg.parameters]

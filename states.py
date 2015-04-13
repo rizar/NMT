@@ -16,47 +16,46 @@ def get_states_wmt15_fi_en_40k():
 
     # Model related
     state['seq_len'] = 50
-    state['enc_nhids'] = 100
-    state['dec_nhids'] = 100
-    state['enc_embed'] = 10
-    state['dec_embed'] = 10
-    state['prefix'] = 'refBlocks_'
+    state['enc_nhids'] = 1000
+    state['dec_nhids'] = 1000
+    state['enc_embed'] = 620
+    state['dec_embed'] = 620
+    state['prefix'] = 'refBlocks2_'
 
     # Optimization related
-    state['batch_size'] = 64
+    state['batch_size'] = 80
     state['sort_k_batches'] = 12
     state['step_rule'] = 'AdaDelta'
-    state['step_clipping'] = 10
+    state['step_clipping'] = 5
+    state['weight_scale'] = 0.01
 
     # Regularization related
-    state['weight_noise_ff'] = False
-    state['weight_noise_rec'] = False
-    state['dropout'] = 1.0
+    state['weight_noise_ff'] = 0.0
+    state['dropout'] = 0.5
 
     # Vocabulary related
-    state['src_vocab_size'] = 250
-    state['trg_vocab_size'] = 250
+    state['src_vocab_size'] = 40001
+    state['trg_vocab_size'] = 40001
     state['unk_id'] = 1
 
     # Early stopping based on bleu related
     state['normalized_bleu'] = True
     state['bleu_script'] = '/data/lisatmp3/firatorh/turkishParallelCorpora/iwslt14/scripts/multi-bleu.perl'
-    state['val_set'] = '/data/lisatmp3/firatorh/nmt/wmt15/data/fi-en/dev/newsdev2015.tok.seg.fi'
-    state['val_set_grndtruth'] = '/data/lisatmp3/firatorh/nmt/wmt15/data/fi-en/dev/newsdev2015.tok.en'
-    state['val_set_out'] = 'refBlokcs_adadelta_40k_out.txt'
+    state['val_set'] = '/data/lisatmp3/firatorh/nmt/wmt15/data/fi-en/dev/newsdev2015_1.tok.seg.fi'
+    state['val_set_grndtruth'] = '/data/lisatmp3/firatorh/nmt/wmt15/data/fi-en/dev/newsdev2015_1.tok.en'
+    state['val_set_out'] = 'refBlocks2_adadelta_40k_out.txt'
     state['output_val_set'] = True
     state['beam_size'] = 20
 
     # Timing related
     state['reload'] = True
-    state['save_freq'] = 1
-    state['sampling_freq'] = 5
-    state['bleu_val_freq'] = 10
-    state['val_burn_in'] = 0
+    state['save_freq'] = 200
+    state['sampling_freq'] = 15
+    state['bleu_val_freq'] = 2000
+    state['val_burn_in'] = 20000
 
     # Monitoring related
     state['hook_samples'] = 1
 
     return ReadOnlyDict(state)
-
 
