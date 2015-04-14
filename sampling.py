@@ -117,8 +117,8 @@ class Sampler(SimpleExtension, SamplingBase):
 class BleuValidator(SimpleExtension, SamplingBase):
 
     def __init__(self, source_sentence, samples, model, data_stream,
-                 state, n_best=1, track_n_models=1, trg_ivocab=None,
-                 init_state_fn=None, **kwargs):
+                 state, n_best=1, track_n_models=1, trg_ivocab=None,#init_state_fn=None,
+                 **kwargs):
         super(BleuValidator, self).__init__(**kwargs)
         self.source_sentence = source_sentence
         self.samples = samples
@@ -127,7 +127,7 @@ class BleuValidator(SimpleExtension, SamplingBase):
         self.state = state
         self.n_best = n_best
         self.track_n_models = track_n_models
-        self.init_state_fn = init_state_fn
+        #self.init_state_fn = init_state_fn
         self.verbose = state.get('val_set_out', None)
 
         # Helpers
@@ -140,7 +140,7 @@ class BleuValidator(SimpleExtension, SamplingBase):
         self.best_models = []
         self.val_bleu_curve = []
         self.beam_search = BeamSearch(beam_size=self.state['beam_size'],
-                                      samples=samples, init_state_fn=self.init_state_fn)
+                                      samples=samples) #, init_state_fn=self.init_state_fn)
         self.multibleu_cmd = ['perl', self.state['bleu_script'],
                               self.state['val_set_grndtruth'], '<']
 

@@ -100,9 +100,9 @@ def get_states_wmt15_fi_en_TEST():
 
     # Timing related
     state['reload'] = False
-    state['save_freq'] = 1
+    state['save_freq'] = 20
     state['sampling_freq'] = 5
-    state['bleu_val_freq'] = 1
+    state['bleu_val_freq'] = 10
     state['val_burn_in'] = 0
 
     # Monitoring related

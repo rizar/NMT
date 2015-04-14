@@ -128,6 +128,28 @@ class BidirectionalEncoder(Initializable):
         return representation
 
 
+class GRUInitialState(GatedRecurrent):
+    def __init__(self, attended_dim, **kwargs):
+        super(GRUInitialState, self).__init__(**kwargs)
+        self.attended_dim = attended_dim
+        self.initial_transformer = MLP(activations=[Tanh()],
+                                       dims=[attended_dim, self.dim],
+                                       name='state_initializer')
+        self.children.append(self.initial_transformer)
+
+    @application
+    def initial_state(self, state_name, batch_size, *args, **kwargs):
+        attended = kwargs['attended']
+        if state_name == 'states':
+            initial_state = self.initial_transformer.apply(
+                attended[0, :, -self.attended_dim:])
+            return initial_state
+        dim = self.get_dim(state_name)
+        if dim == 0:
+            return tensor.zeros((batch_size,))
+        return tensor.zeros((batch_size, dim))
+
+
 class Decoder(Initializable):
     def __init__(self, vocab_size, embedding_dim, state_dim,
                  representation_dim, **kwargs):
@@ -137,7 +159,10 @@ class Decoder(Initializable):
         self.state_dim = state_dim
         self.representation_dim = representation_dim
 
-        self.transition = GatedRecurrent(dim=state_dim, activation=Tanh(), name='decoder')
+        #self.transition = GatedRecurrent(dim=state_dim, activation=Tanh(), name='decoder')
+        self.transition = GRUInitialState(
+            attended_dim=state_dim, dim=state_dim,
+            activation=Tanh(), name='decoder')
         self.attention = SequenceContentAttention(
             state_names=self.transition.apply.states,
             attended_dim=representation_dim,
@@ -156,8 +181,8 @@ class Decoder(Initializable):
                  Linear(input_dim=embedding_dim).apply]),
             merged_dim=state_dim)
 
-        self.state_init = MLP(activations=[Tanh()], dims=[state_dim, state_dim],
-                              name='state_initializer')
+        #self.state_init = MLP(activations=[Tanh()], dims=[state_dim, state_dim],
+        #                      name='state_initializer')
 
         self.sequence_generator = SequenceGenerator(
             readout=readout,
@@ -167,7 +192,7 @@ class Decoder(Initializable):
                        if name != 'mask'], prototype=Linear())
         )
 
-        self.children = [self.sequence_generator, self.state_init]
+        self.children = [self.sequence_generator] #, self.state_init]
 
     @application(inputs=['representation', 'source_sentence_mask',
                          'target_sentence_mask', 'target_sentence'],
@@ -179,11 +204,11 @@ class Decoder(Initializable):
         target_sentence = target_sentence.T
         target_sentence_mask = target_sentence_mask.T
 
-        init_states = self.state_init.apply(representation[0, :, -self.state_dim:])
+        #init_states = self.state_init.apply(representation[0, :, -self.state_dim:])
 
         # Get the cost matrix
         cost = self.sequence_generator.cost_matrix(
-                    **{'states': init_states,
+                    **{#'states': init_states,
                        'mask': target_sentence_mask,
                        'outputs': target_sentence,
                        'attended': representation,
@@ -196,12 +221,12 @@ class Decoder(Initializable):
     def generate(self, source_sentence, representation):
 
         # TODO: Check this, seems OK
-        init_states = self.state_init.apply(representation[0, :, -self.state_dim:])
+        #init_states = self.state_init.apply(representation[0, :, -self.state_dim:])
 
         return self.sequence_generator.generate(
             n_steps=2 * source_sentence.shape[1],
             batch_size=source_sentence.shape[0],
-            states=init_states,
+            #states=init_states,
             attended=representation,
             attended_mask=tensor.ones(source_sentence.shape).T)
 
@@ -281,9 +306,9 @@ if __name__ == "__main__":
             ComputationGraph(generated[1]))  # generated[1] is the next_outputs
 
     # Compile a function for initial state of decoder rnn
-    init_states = sampling_decoder.state_init.apply(
-        sampling_representation[0, :, -state['enc_nhids']:])
-    init_state_fn = theano.function([sampling_representation], init_states)
+    #init_states = sampling_decoder.state_init.apply(
+    #    sampling_representation[0, :, -state['enc_nhids']:])
+    #init_state_fn = theano.function([sampling_representation], init_states)
 
     # Set up training model
     training_model = Model(cost)
@@ -300,7 +325,8 @@ if __name__ == "__main__":
             BleuValidator(sampling_input, samples=samples, state=state,
                           model=search_model, data_stream=dev_stream,
                           every_n_batches=state['bleu_val_freq'],
-                          init_state_fn=init_state_fn),
+                          #init_state_fn=init_state_fn
+                          ),
             TrainingDataMonitoring([cost], after_batch=True),
             #Plot('En-Fr', channels=[['decoder_cost_cost']],
             #     after_batch=True),
