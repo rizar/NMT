@@ -14,7 +14,38 @@ from subprocess import Popen, PIPE
 logger = logging.getLogger(__name__)
 
 
-class Sampler(SimpleExtension):
+class SamplingBase(object):
+
+    def _get_attr_rec(self, obj, attr):
+        return self._get_attr_rec(getattr(obj, attr), attr) \
+            if hasattr(obj, attr) else obj
+
+    def _get_true_length(self, seq, vocab):
+        try:
+            return seq.tolist().index(vocab['</S>']) + 1
+        except ValueError:
+            return len(seq)
+
+    def _oov_to_unk(self, seq):
+        return [x if x < self.state['src_vocab_size'] else self.unk_idx
+                for x in seq]
+
+    def _parse_input(self, line):
+        seqin = line.split()
+        seqlen = len(seqin)
+        seq = numpy.zeros(seqlen+1, dtype='int64')
+        for idx, sx in enumerate(seqin):
+            seq[idx] = self.vocab.get(sx, self.unk_idx)
+            if seq[idx] >= self.state['src_vocab_size']:
+                seq[idx] = self.unk_idx
+        seq[-1] = self.eos_idx
+        return seq
+
+    def _idx_to_word(self, seq, ivocab):
+        return " ".join([ivocab.get(idx, "<UNK>") for idx in seq])
+
+
+class Sampler(SimpleExtension, SamplingBase):
 
     def __init__(self, model, data_stream, state,
                  src_vocab=None, trg_vocab=None, src_ivocab=None,
@@ -82,24 +113,12 @@ class Sampler(SimpleExtension):
             print "Sample cost: ", costs[i][:sample_length].sum()
             print ""
 
-    def _get_attr_rec(self, obj, attr):
-        return self._get_attr_rec(getattr(obj, attr), attr) \
-            if hasattr(obj, attr) else obj
 
-    def _idx_to_word(self, seq, ivocab):
-        return " ".join([ivocab.get(idx, "<UNK>") for idx in seq])
-
-    def _get_true_length(self, seq, vocab):
-        try:
-            return seq.tolist().index(vocab['</S>']) + 1
-        except ValueError:
-            return len(seq)
-
-
-class BleuValidator(SimpleExtension):
+class BleuValidator(SimpleExtension, SamplingBase):
 
     def __init__(self, source_sentence, samples, model, data_stream,
-                 state, n_best=1, track_n_models=1, **kwargs):
+                 state, n_best=1, track_n_models=1, trg_ivocab=None,
+                 init_state_fn=None, **kwargs):
         super(BleuValidator, self).__init__(**kwargs)
         self.source_sentence = source_sentence
         self.samples = samples
@@ -108,10 +127,12 @@ class BleuValidator(SimpleExtension):
         self.state = state
         self.n_best = n_best
         self.track_n_models = track_n_models
+        self.init_state_fn = init_state_fn
         self.verbose = state.get('val_set_out', None)
 
         # Helpers
         self.vocab = data_stream.dataset.dictionary
+        self.trg_ivocab = trg_ivocab
         self.unk_sym = data_stream.dataset.unk_token
         self.eos_sym = data_stream.dataset.eos_token
         self.unk_idx = self.vocab[self.unk_sym]
@@ -119,7 +140,7 @@ class BleuValidator(SimpleExtension):
         self.best_models = []
         self.val_bleu_curve = []
         self.beam_search = BeamSearch(beam_size=self.state['beam_size'],
-                                      samples=samples)
+                                      samples=samples, init_state_fn=self.init_state_fn)
         self.multibleu_cmd = ['perl', self.state['bleu_script'],
                               self.state['val_set_grndtruth'], '<']
 
@@ -158,6 +179,12 @@ class BleuValidator(SimpleExtension):
         mb_subprocess = Popen(self.multibleu_cmd, stdin=PIPE, stdout=PIPE)
         total_cost = 0.0
 
+        # Get target vocabulary
+        if not self.trg_ivocab:
+            sources = self._get_attr_rec(self.main_loop, 'data_stream')
+            trg_vocab = sources.data_streams[1].dataset.dictionary
+            self.trg_ivocab = {v: k for k, v in trg_vocab.items()}
+
         if self.verbose:
             ftrans = open(self.state['val_set_out'], 'w')
 
@@ -170,6 +197,7 @@ class BleuValidator(SimpleExtension):
             input_ = numpy.tile(seq, (self.state['beam_size'], 1))
 
             # draw sample, checking to ensure we don't get an empty string back
+            import ipdb;ipdb.set_trace()
             trans, costs = \
                 self.beam_search.search(
                     input_values={self.source_sentence: input_},
@@ -181,6 +209,10 @@ class BleuValidator(SimpleExtension):
                 try:
                     total_cost += costs[best]
                     trans_out = trans[best]
+
+                    # convert idx to words
+                    trans_out = self._idx_to_word(trans_out, self.trg_ivocab)
+
                 except ValueError:
                     print "Could not fine a translation for line: {}".format(i+1)
                     trans_out = '<UNK>'
@@ -247,23 +279,6 @@ class BleuValidator(SimpleExtension):
                         bleu_scores=self.val_bleu_curve)
             signal.signal(signal.SIGINT, s)
 
-    def _oov_to_unk(self, seq):
-        return [x if x < self.state['src_vocab_size'] else self.unk_idx
-                for x in seq]
-
-    def _parse_input(self, line):
-        seqin = line.split()
-        seqlen = len(seqin)
-        seq = numpy.zeros(seqlen+1, dtype='int64')
-        for idx, sx in enumerate(seqin):
-            seq[idx] = self.vocab.get(sx, self.unk_idx)
-            if seq[idx] >= self.state['src_vocab_size']:
-                seq[idx] = self.unk_idx
-        seq[-1] = self.eos_idx
-        return seq
-
-    def _idx_to_word(self, seq, ivocab):
-        return " ".join([ivocab.get(idx, "<UNK>") for idx in seq])
 
 
 class ModelInfo:

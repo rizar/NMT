@@ -5,6 +5,7 @@ from collections import Counter
 import argparse
 import numpy
 import os
+import cPickle
 import theano
 from theano import tensor
 from toolz import merge
@@ -235,7 +236,7 @@ if __name__ == "__main__":
                         source_sentence_mask, target_sentence, target_sentence_mask)
 
     # Initialize model
-    encoder.weights_init = decoder.weights_init = IsotropicGaussian(0.1)
+    encoder.weights_init = decoder.weights_init = IsotropicGaussian(state['weight_scale'])
     encoder.biases_init = decoder.biases_init = Constant(0)
     encoder.push_initialization_config()
     decoder.push_initialization_config()
@@ -260,6 +261,10 @@ if __name__ == "__main__":
     )
 
     # Set up beam search
+    '''
+    theano.config.compute_test_value = 'warn'
+    sampling_input.tag.test_value = numpy.random.randint(10, size=(5, 7))
+    '''
     sampling_encoder = BidirectionalEncoder(
         state['src_vocab_size'], state['enc_embed'], state['enc_nhids'])
     sampling_decoder = Decoder(state['trg_vocab_size'], state['dec_embed'],
@@ -275,19 +280,15 @@ if __name__ == "__main__":
         bricks=[sampling_decoder.sequence_generator], name="outputs")(
             ComputationGraph(generated[1]))  # generated[1] is the next_outputs
 
+    # Compile a function for initial state of decoder rnn
+    init_states = sampling_decoder.state_init.apply(
+        sampling_representation[0, :, -state['enc_nhids']:])
+    init_state_fn = theano.function([sampling_representation], init_states)
+
     # Set up training model
     training_model = Model(cost)
 
-    # Reload model
-    # TODO: This is buggy itself in blocks currently
-    '''
-    import ipdb;ipdb.set_trace()
-    file_to_load = state['prefix'] + 'model.pkl'
-    if state['reload'] and os.path.isfile(file_to_load):
-        training_model.set_param_values(load_parameter_values(file_to_load))
-    '''
-
-    # Train!
+    # Initialize main loop
     main_loop = MainLoop(
         model=training_model,
         algorithm=algorithm,
@@ -298,7 +299,8 @@ if __name__ == "__main__":
                     every_n_batches=state['sampling_freq']),
             BleuValidator(sampling_input, samples=samples, state=state,
                           model=search_model, data_stream=dev_stream,
-                          every_n_batches=state['bleu_val_freq']),
+                          every_n_batches=state['bleu_val_freq'],
+                          init_state_fn=init_state_fn),
             TrainingDataMonitoring([cost], after_batch=True),
             #Plot('En-Fr', channels=[['decoder_cost_cost']],
             #     after_batch=True),
@@ -307,4 +309,11 @@ if __name__ == "__main__":
                        every_n_batches=state['save_freq'])
         ]
     )
+
+    # Reload model
+    file_to_load = state['prefix'] + 'model.pkl'
+    if state['reload'] and os.path.isfile(file_to_load):
+        main_loop = cPickle.load(open(file_to_load))
+
+    # Train!
     main_loop.run()
