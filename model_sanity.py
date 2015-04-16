@@ -3,7 +3,6 @@
 # 0e23b0193f64dc3e56da18605d53d6f5b1352848
 from collections import Counter
 import argparse
-import logging
 import numpy
 import os
 import cPickle
@@ -39,8 +38,6 @@ from blocks.bricks.sequence_generators import (
 
 from stream_fi_en import masked_stream, state, dev_stream
 from sampling import BleuValidator, Sampler
-
-logger = logging.getLogger(__name__)
 
 
 # Helper class
@@ -259,9 +256,9 @@ if __name__ == "__main__":
 
     # Print shapes
     shapes = [param.get_value().shape for param in cg.parameters]
-    logger.info("Parameter shapes: ")
+    print('Parameter shapes')
     for shape, count in Counter(shapes).most_common():
-        logger.info('    {:15}: {}'.format(shape, count))
+        print('    {:15}: {}'.format(shape, count))
 
     # Set up training algorithm
     algorithm = GradientDescent(
@@ -271,6 +268,10 @@ if __name__ == "__main__":
     )
 
     # Set up beam search
+    '''
+    theano.config.compute_test_value = 'warn'
+    sampling_input.tag.test_value = numpy.random.randint(10, size=(5, 7))
+    '''
     sampling_encoder = BidirectionalEncoder(
         state['src_vocab_size'], state['enc_embed'], state['enc_nhids'])
     sampling_decoder = Decoder(state['trg_vocab_size'], state['dec_embed'],
@@ -289,17 +290,84 @@ if __name__ == "__main__":
     # Set up training model
     training_model = Model(cost)
 
+    from blocks.select import Selector
+    enc_param_dict = Selector(encoder).get_params()
+    dec_param_dict = Selector(decoder).get_params()
+
+    gh_model_name = '/data/lisatmp3/firatorh/nmt/wmt15/trainedModels/withoutLM/refGHOG_best_bleu_model.npz'
+
+    tmp_file = numpy.load(gh_model_name)
+    gh_model = dict(tmp_file)
+    tmp_file.close()
+
+    for key in enc_param_dict:
+        print '{:15}: {}'.format(enc_param_dict[key].get_value().shape, key)
+    for key in dec_param_dict:
+        print '{:15}: {}'.format(dec_param_dict[key].get_value().shape, key)
+
+    enc_param_dict['/bidirectionalencoder/embeddings.W'].set_value(gh_model['W_0_enc_approx_embdr'] + gh_model['b_0_enc_approx_embdr'])
+
+    enc_param_dict['/bidirectionalencoder/bidirectionalwmt15/forward.state_to_state'].set_value(gh_model['W_enc_transition_0'])
+    enc_param_dict['/bidirectionalencoder/bidirectionalwmt15/forward.state_to_update'].set_value(gh_model['G_enc_transition_0'])
+    enc_param_dict['/bidirectionalencoder/bidirectionalwmt15/forward.state_to_reset'].set_value(gh_model['R_enc_transition_0'])
+
+    enc_param_dict['/bidirectionalencoder/fwd_fork/fork_inputs.W'].set_value(gh_model['W_0_enc_input_embdr_0'])
+    enc_param_dict['/bidirectionalencoder/fwd_fork/fork_inputs.b'].set_value(gh_model['b_0_enc_input_embdr_0'])
+    enc_param_dict['/bidirectionalencoder/fwd_fork/fork_update_inputs.W'].set_value(gh_model['W_0_enc_update_embdr_0'])
+    enc_param_dict['/bidirectionalencoder/fwd_fork/fork_reset_inputs.W'].set_value(gh_model['W_0_enc_reset_embdr_0'])
+
+    enc_param_dict['/bidirectionalencoder/bidirectionalwmt15/backward.state_to_state'].set_value(gh_model['W_back_enc_transition_0'])
+    enc_param_dict['/bidirectionalencoder/bidirectionalwmt15/backward.state_to_update'].set_value(gh_model['G_back_enc_transition_0'])
+    enc_param_dict['/bidirectionalencoder/bidirectionalwmt15/backward.state_to_reset'].set_value(gh_model['R_back_enc_transition_0'])
+
+    enc_param_dict['/bidirectionalencoder/back_fork/fork_inputs.W'].set_value(gh_model['W_0_back_enc_input_embdr_0'])
+    enc_param_dict['/bidirectionalencoder/back_fork/fork_inputs.b'].set_value(gh_model['b_0_back_enc_input_embdr_0'])
+    enc_param_dict['/bidirectionalencoder/back_fork/fork_update_inputs.W'].set_value(gh_model['W_0_back_enc_update_embdr_0'])
+    enc_param_dict['/bidirectionalencoder/back_fork/fork_reset_inputs.W'].set_value(gh_model['W_0_back_enc_reset_embdr_0'])
+
+    dec_param_dict['/decoder/sequencegenerator/readout/lookupfeedbackwmt15/lookuptable.W'].set_value(gh_model['W_0_dec_approx_embdr'] + gh_model['b_0_dec_approx_embdr'])
+
+    dec_param_dict['/decoder/sequencegenerator/readout/initializablefeedforwardsequence/bias.b'].set_value(gh_model['b_0_dec_hid_readout_0'])
+    decoder.children[0].children[0].children[3].children[2].params[0].set_value(gh_model['W1_dec_deep_softmax']) # Missing W1
+    dec_param_dict['/decoder/sequencegenerator/readout/initializablefeedforwardsequence/linear.W'].set_value(gh_model['W2_dec_deep_softmax'])
+    dec_param_dict['/decoder/sequencegenerator/readout/initializablefeedforwardsequence/linear.b'].set_value(gh_model['b_dec_deep_softmax'])
+
+    dec_param_dict['/decoder/sequencegenerator/readout/merge/transform_states.W'].set_value(gh_model['W_0_dec_hid_readout_0'])
+    dec_param_dict['/decoder/sequencegenerator/readout/merge/transform_feedback.W'].set_value(gh_model['W_0_dec_prev_readout_0'])
+    dec_param_dict['/decoder/sequencegenerator/readout/merge/transform_weighted_averages.W'].set_value(gh_model['W_0_dec_repr_readout'])
+
+    dec_param_dict['/decoder/sequencegenerator/fork/fork_inputs.b'].set_value(gh_model['b_0_dec_input_embdr_0'])
+    dec_param_dict['/decoder/sequencegenerator/fork/fork_inputs.W'].set_value(gh_model['W_0_dec_input_embdr_0'])
+    dec_param_dict['/decoder/sequencegenerator/fork/fork_update_inputs.W'].set_value(gh_model['W_0_dec_update_embdr_0'])
+    dec_param_dict['/decoder/sequencegenerator/fork/fork_reset_inputs.W'].set_value(gh_model['W_0_dec_reset_embdr_0'])
+
+    dec_param_dict['/decoder/sequencegenerator/att_trans/distribute/fork_inputs.W'].set_value(gh_model['W_0_dec_dec_inputter_0'])
+    dec_param_dict['/decoder/sequencegenerator/att_trans/distribute/fork_update_inputs.W'].set_value(gh_model['W_0_dec_dec_updater_0'])
+    dec_param_dict['/decoder/sequencegenerator/att_trans/distribute/fork_reset_inputs.W'].set_value(gh_model['W_0_dec_dec_reseter_0'])
+
+    dec_param_dict['/decoder/sequencegenerator/att_trans/decoder.state_to_state'].set_value(gh_model['W_dec_transition_0'])
+    dec_param_dict['/decoder/sequencegenerator/att_trans/decoder.state_to_update'].set_value(gh_model['G_dec_transition_0'])
+    dec_param_dict['/decoder/sequencegenerator/att_trans/decoder.state_to_reset'].set_value(gh_model['R_dec_transition_0'])
+
+    dec_param_dict['/decoder/sequencegenerator/att_trans/attention/state_trans/transform_states.W'].set_value(gh_model['B_dec_transition_0'])
+    dec_param_dict['/decoder/sequencegenerator/att_trans/attention/preprocess.W'].set_value(gh_model['A_dec_transition_0'])
+    dec_param_dict['/decoder/sequencegenerator/att_trans/attention/energy_comp/mlp/linear_0.W'].set_value(gh_model['D_dec_transition_0'])
+
+    dec_param_dict['/decoder/sequencegenerator/att_trans/decoder/state_initializer/linear_0.W'].set_value(gh_model['W_0_dec_initializer_0'])
+    dec_param_dict['/decoder/sequencegenerator/att_trans/decoder/state_initializer/linear_0.b'].set_value(gh_model['b_0_dec_initializer_0'])
+
     # Initialize main loop
     main_loop = MainLoop(
         model=training_model,
         algorithm=algorithm,
         data_stream=masked_stream,
         extensions=[
+            #LoadFromDump(state['prefix'] + 'model.pkl'),
             Sampler(model=search_model, state=state, data_stream=masked_stream,
                     every_n_batches=state['sampling_freq']),
             BleuValidator(sampling_input, samples=samples, state=state,
                           model=search_model, data_stream=dev_stream,
-                          every_n_batches=state['bleu_val_freq']),
+                          before_batch=True), #every_n_batches=state['bleu_val_freq']),
             TrainingDataMonitoring([cost], after_batch=True),
             #Plot('En-Fr', channels=[['decoder_cost_cost']],
             #     after_batch=True),
@@ -311,12 +379,8 @@ if __name__ == "__main__":
 
     # Reload model
     file_to_load = state['prefix'] + 'model.pkl'
-    if state['reload']:
-        try:
-            main_loop = cPickle.load(open(file_to_load))
-            logger.info("Model {} loaded!".format(file_to_load))
-        except IOError:
-            logger.info("Error loading model {}!".format(file_to_load))
+    if state['reload'] and os.path.isfile(file_to_load):
+        main_loop = cPickle.load(open(file_to_load))
 
     # Train!
     main_loop.run()

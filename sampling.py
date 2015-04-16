@@ -14,7 +14,38 @@ from subprocess import Popen, PIPE
 logger = logging.getLogger(__name__)
 
 
-class Sampler(SimpleExtension):
+class SamplingBase(object):
+
+    def _get_attr_rec(self, obj, attr):
+        return self._get_attr_rec(getattr(obj, attr), attr) \
+            if hasattr(obj, attr) else obj
+
+    def _get_true_length(self, seq, vocab):
+        try:
+            return seq.tolist().index(vocab['</S>']) + 1
+        except ValueError:
+            return len(seq)
+
+    def _oov_to_unk(self, seq):
+        return [x if x < self.state['src_vocab_size'] else self.unk_idx
+                for x in seq]
+
+    def _parse_input(self, line):
+        seqin = line.split()
+        seqlen = len(seqin)
+        seq = numpy.zeros(seqlen+1, dtype='int64')
+        for idx, sx in enumerate(seqin):
+            seq[idx] = self.vocab.get(sx, self.unk_idx)
+            if seq[idx] >= self.state['src_vocab_size']:
+                seq[idx] = self.unk_idx
+        seq[-1] = self.eos_idx
+        return seq
+
+    def _idx_to_word(self, seq, ivocab):
+        return " ".join([ivocab.get(idx, "<UNK>") for idx in seq])
+
+
+class Sampler(SimpleExtension, SamplingBase):
 
     def __init__(self, model, data_stream, state,
                  src_vocab=None, trg_vocab=None, src_ivocab=None,
@@ -27,12 +58,14 @@ class Sampler(SimpleExtension):
         self.trg_vocab = trg_vocab
         self.src_ivocab = src_ivocab
         self.trg_ivocab = trg_ivocab
+        self.is_synced = False
 
     def do(self, which_callback, *args):
 
         # Get current model parameters
-        self.model.set_param_values(
-            self.main_loop.model.get_param_values())
+        if not self.is_synced:
+            self.model.params = self.main_loop.model.params
+            self.is_synced = True
 
         # Get dictionaries, this may not be the practical way
         sources = self._get_attr_rec(self.main_loop, 'data_stream')
@@ -82,24 +115,12 @@ class Sampler(SimpleExtension):
             print "Sample cost: ", costs[i][:sample_length].sum()
             print ""
 
-    def _get_attr_rec(self, obj, attr):
-        return self._get_attr_rec(getattr(obj, attr), attr) \
-            if hasattr(obj, attr) else obj
 
-    def _idx_to_word(self, seq, ivocab):
-        return " ".join([ivocab.get(idx, "<UNK>") for idx in seq])
-
-    def _get_true_length(self, seq, vocab):
-        try:
-            return seq.tolist().index(vocab['</S>']) + 1
-        except ValueError:
-            return len(seq)
-
-
-class BleuValidator(SimpleExtension):
+class BleuValidator(SimpleExtension, SamplingBase):
 
     def __init__(self, source_sentence, samples, model, data_stream,
-                 state, n_best=1, track_n_models=1, **kwargs):
+                 state, n_best=1, track_n_models=1, trg_ivocab=None,
+                 **kwargs):
         super(BleuValidator, self).__init__(**kwargs)
         self.source_sentence = source_sentence
         self.samples = samples
@@ -112,13 +133,15 @@ class BleuValidator(SimpleExtension):
 
         # Helpers
         self.vocab = data_stream.dataset.dictionary
+        self.trg_ivocab = trg_ivocab
         self.unk_sym = data_stream.dataset.unk_token
         self.eos_sym = data_stream.dataset.eos_token
         self.unk_idx = self.vocab[self.unk_sym]
         self.eos_idx = self.vocab[self.eos_sym]
         self.best_models = []
         self.val_bleu_curve = []
-        self.beam_search = BeamSearch(beam_size=self.state['beam_size'],
+        self.beam_search = BeamSearch(source_sentence,
+                                      beam_size=self.state['beam_size'],
                                       samples=samples)
         self.multibleu_cmd = ['perl', self.state['bleu_script'],
                               self.state['val_set_grndtruth'], '<']
@@ -158,6 +181,12 @@ class BleuValidator(SimpleExtension):
         mb_subprocess = Popen(self.multibleu_cmd, stdin=PIPE, stdout=PIPE)
         total_cost = 0.0
 
+        # Get target vocabulary
+        if not self.trg_ivocab:
+            sources = self._get_attr_rec(self.main_loop, 'data_stream')
+            trg_vocab = sources.data_streams[1].dataset.dictionary
+            self.trg_ivocab = {v: k for k, v in trg_vocab.items()}
+
         if self.verbose:
             ftrans = open(self.state['val_set_out'], 'w')
 
@@ -181,8 +210,12 @@ class BleuValidator(SimpleExtension):
                 try:
                     total_cost += costs[best]
                     trans_out = trans[best]
+
+                    # convert idx to words
+                    trans_out = self._idx_to_word(trans_out, self.trg_ivocab)
+
                 except ValueError:
-                    print "Could not fine a translation for line: {}".format(i+1)
+                    print "Can NOT find a translation for line: {}".format(i+1)
                     trans_out = '<UNK>'
 
                 if j == 0:
@@ -220,7 +253,7 @@ class BleuValidator(SimpleExtension):
 
     def _is_valid_to_save(self, bleu_score):
         if not self.best_models or min(self.best_models,
-               key=operator.attrgetter('bleu_score')) < bleu_score:
+           key=operator.attrgetter('bleu_score')).bleu_score < bleu_score:
             return True
         return False
 
@@ -246,24 +279,6 @@ class BleuValidator(SimpleExtension):
             numpy.savez(self.state['prefix'] + 'val_bleu_scores.npz',
                         bleu_scores=self.val_bleu_curve)
             signal.signal(signal.SIGINT, s)
-
-    def _oov_to_unk(self, seq):
-        return [x if x < self.state['src_vocab_size'] else self.unk_idx
-                for x in seq]
-
-    def _parse_input(self, line):
-        seqin = line.split()
-        seqlen = len(seqin)
-        seq = numpy.zeros(seqlen+1, dtype='int64')
-        for idx, sx in enumerate(seqin):
-            seq[idx] = self.vocab.get(sx, self.unk_idx)
-            if seq[idx] >= self.state['src_vocab_size']:
-                seq[idx] = self.unk_idx
-        seq[-1] = self.eos_idx
-        return seq
-
-    def _idx_to_word(self, seq, ivocab):
-        return " ".join([ivocab.get(idx, "<UNK>") for idx in seq])
 
 
 class ModelInfo:
