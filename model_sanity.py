@@ -1,6 +1,6 @@
 # This is the RNNsearch model
-# Works with Blocks commit
-# 7a8bb2f8d20828568aa509c1b9ae6918bcd04129
+# Works with https://github.com/orhanf/blocks/tree/wmt15
+# 0e23b0193f64dc3e56da18605d53d6f5b1352848
 from collections import Counter
 import argparse
 import numpy
@@ -63,13 +63,6 @@ class LookupFeedbackWMT15(LookupFeedback):
         return lookup
 
 
-class SoftmaxEmitterWMT15(SoftmaxEmitter):
-
-    @application
-    def initial_outputs(self, batch_size, *args, **kwargs):
-        return -tensor.ones((batch_size,), dtype='int64')
-
-
 class BidirectionalWMT15(Bidirectional):
 
     @application
@@ -121,9 +114,9 @@ class BidirectionalEncoder(Initializable):
 
         representation = self.bidir.apply(
             merge(self.fwd_fork.apply(embeddings, as_dict=True),
-            {'mask': source_sentence_mask}),
+                  {'mask': source_sentence_mask}),
             merge(self.back_fork.apply(embeddings, as_dict=True),
-            {'mask': source_sentence_mask})
+                  {'mask': source_sentence_mask})
         )
         return representation
 
@@ -170,7 +163,7 @@ class Decoder(Initializable):
         readout = Readout(
             source_names=['states', 'feedback', self.attention.take_glimpses.outputs[0]],
             readout_dim=self.vocab_size,
-            emitter=SoftmaxEmitterWMT15(),
+            emitter=SoftmaxEmitter(initial_output=-1),
             feedback_brick=LookupFeedbackWMT15(vocab_size, embedding_dim),
             post_merge=InitializableFeedforwardSequence(
                 [Bias(dim=state_dim).apply,
@@ -216,7 +209,8 @@ class Decoder(Initializable):
             n_steps=2 * source_sentence.shape[1],
             batch_size=source_sentence.shape[0],
             attended=representation,
-            attended_mask=tensor.ones(source_sentence.shape).T)
+            attended_mask=tensor.ones(source_sentence.shape).T,
+            glimpses=self.attention.take_glimpses.outputs[0])
 
 
 if __name__ == "__main__":
@@ -296,7 +290,72 @@ if __name__ == "__main__":
     # Set up training model
     training_model = Model(cost)
 
-    import ipdb;ipdb.set_trace()
+    from blocks.select import Selector
+    enc_param_dict = Selector(encoder).get_params()
+    dec_param_dict = Selector(decoder).get_params()
+
+    gh_model_name = '/data/lisatmp3/firatorh/nmt/wmt15/trainedModels/withoutLM/refGHOG_best_bleu_model.npz'
+
+    tmp_file = numpy.load(gh_model_name)
+    gh_model = dict(tmp_file)
+    tmp_file.close()
+
+    for key in enc_param_dict:
+        print '{:15}: {}'.format(enc_param_dict[key].get_value().shape, key)
+    for key in dec_param_dict:
+        print '{:15}: {}'.format(dec_param_dict[key].get_value().shape, key)
+
+    enc_param_dict['/bidirectionalencoder/embeddings.W'].set_value(gh_model['W_0_enc_approx_embdr'] + gh_model['b_0_enc_approx_embdr'])
+
+    enc_param_dict['/bidirectionalencoder/bidirectionalwmt15/forward.state_to_state'].set_value(gh_model['W_enc_transition_0'])
+    enc_param_dict['/bidirectionalencoder/bidirectionalwmt15/forward.state_to_update'].set_value(gh_model['G_enc_transition_0'])
+    enc_param_dict['/bidirectionalencoder/bidirectionalwmt15/forward.state_to_reset'].set_value(gh_model['R_enc_transition_0'])
+
+    enc_param_dict['/bidirectionalencoder/fwd_fork/fork_inputs.W'].set_value(gh_model['W_0_enc_input_embdr_0'])
+    enc_param_dict['/bidirectionalencoder/fwd_fork/fork_inputs.b'].set_value(gh_model['b_0_enc_input_embdr_0'])
+    enc_param_dict['/bidirectionalencoder/fwd_fork/fork_update_inputs.W'].set_value(gh_model['W_0_enc_update_embdr_0'])
+    enc_param_dict['/bidirectionalencoder/fwd_fork/fork_reset_inputs.W'].set_value(gh_model['W_0_enc_reset_embdr_0'])
+
+    enc_param_dict['/bidirectionalencoder/bidirectionalwmt15/backward.state_to_state'].set_value(gh_model['W_back_enc_transition_0'])
+    enc_param_dict['/bidirectionalencoder/bidirectionalwmt15/backward.state_to_update'].set_value(gh_model['G_back_enc_transition_0'])
+    enc_param_dict['/bidirectionalencoder/bidirectionalwmt15/backward.state_to_reset'].set_value(gh_model['R_back_enc_transition_0'])
+
+    enc_param_dict['/bidirectionalencoder/back_fork/fork_inputs.W'].set_value(gh_model['W_0_back_enc_input_embdr_0'])
+    enc_param_dict['/bidirectionalencoder/back_fork/fork_inputs.b'].set_value(gh_model['b_0_back_enc_input_embdr_0'])
+    enc_param_dict['/bidirectionalencoder/back_fork/fork_update_inputs.W'].set_value(gh_model['W_0_back_enc_update_embdr_0'])
+    enc_param_dict['/bidirectionalencoder/back_fork/fork_reset_inputs.W'].set_value(gh_model['W_0_back_enc_reset_embdr_0'])
+
+    dec_param_dict['/decoder/sequencegenerator/readout/lookupfeedbackwmt15/lookuptable.W'].set_value(gh_model['W_0_dec_approx_embdr'] + gh_model['b_0_dec_approx_embdr'])
+
+    dec_param_dict['/decoder/sequencegenerator/readout/initializablefeedforwardsequence/bias.b'].set_value(gh_model['b_0_dec_hid_readout_0'])
+    decoder.children[0].children[0].children[3].children[2].params[0].set_value(gh_model['W1_dec_deep_softmax']) # Missing W1
+    dec_param_dict['/decoder/sequencegenerator/readout/initializablefeedforwardsequence/linear.W'].set_value(gh_model['W2_dec_deep_softmax'])
+    dec_param_dict['/decoder/sequencegenerator/readout/initializablefeedforwardsequence/linear.b'].set_value(gh_model['b_dec_deep_softmax'])
+
+    dec_param_dict['/decoder/sequencegenerator/readout/merge/transform_states.W'].set_value(gh_model['W_0_dec_hid_readout_0'])
+    dec_param_dict['/decoder/sequencegenerator/readout/merge/transform_feedback.W'].set_value(gh_model['W_0_dec_prev_readout_0'])
+    dec_param_dict['/decoder/sequencegenerator/readout/merge/transform_weighted_averages.W'].set_value(gh_model['W_0_dec_repr_readout'])
+
+    dec_param_dict['/decoder/sequencegenerator/fork/fork_inputs.b'].set_value(gh_model['b_0_dec_input_embdr_0'])
+    dec_param_dict['/decoder/sequencegenerator/fork/fork_inputs.W'].set_value(gh_model['W_0_dec_input_embdr_0'])
+    dec_param_dict['/decoder/sequencegenerator/fork/fork_update_inputs.W'].set_value(gh_model['W_0_dec_update_embdr_0'])
+    dec_param_dict['/decoder/sequencegenerator/fork/fork_reset_inputs.W'].set_value(gh_model['W_0_dec_reset_embdr_0'])
+
+    dec_param_dict['/decoder/sequencegenerator/att_trans/distribute/fork_inputs.W'].set_value(gh_model['W_0_dec_dec_inputter_0'])
+    dec_param_dict['/decoder/sequencegenerator/att_trans/distribute/fork_update_inputs.W'].set_value(gh_model['W_0_dec_dec_updater_0'])
+    dec_param_dict['/decoder/sequencegenerator/att_trans/distribute/fork_reset_inputs.W'].set_value(gh_model['W_0_dec_dec_reseter_0'])
+
+    dec_param_dict['/decoder/sequencegenerator/att_trans/decoder.state_to_state'].set_value(gh_model['W_dec_transition_0'])
+    dec_param_dict['/decoder/sequencegenerator/att_trans/decoder.state_to_update'].set_value(gh_model['G_dec_transition_0'])
+    dec_param_dict['/decoder/sequencegenerator/att_trans/decoder.state_to_reset'].set_value(gh_model['R_dec_transition_0'])
+
+    dec_param_dict['/decoder/sequencegenerator/att_trans/attention/state_trans/transform_states.W'].set_value(gh_model['B_dec_transition_0'])
+    dec_param_dict['/decoder/sequencegenerator/att_trans/attention/preprocess.W'].set_value(gh_model['A_dec_transition_0'])
+    dec_param_dict['/decoder/sequencegenerator/att_trans/attention/energy_comp/mlp/linear_0.W'].set_value(gh_model['D_dec_transition_0'])
+
+    dec_param_dict['/decoder/sequencegenerator/att_trans/decoder/state_initializer/linear_0.W'].set_value(gh_model['W_0_dec_initializer_0'])
+    dec_param_dict['/decoder/sequencegenerator/att_trans/decoder/state_initializer/linear_0.b'].set_value(gh_model['b_0_dec_initializer_0'])
+
     # Initialize main loop
     main_loop = MainLoop(
         model=training_model,
@@ -308,7 +367,7 @@ if __name__ == "__main__":
                     every_n_batches=state['sampling_freq']),
             BleuValidator(sampling_input, samples=samples, state=state,
                           model=search_model, data_stream=dev_stream,
-                          every_n_batches=state['bleu_val_freq']),
+                          before_batch=True), #every_n_batches=state['bleu_val_freq']),
             TrainingDataMonitoring([cost], after_batch=True),
             #Plot('En-Fr', channels=[['decoder_cost_cost']],
             #     after_batch=True),

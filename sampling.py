@@ -117,7 +117,7 @@ class Sampler(SimpleExtension, SamplingBase):
 class BleuValidator(SimpleExtension, SamplingBase):
 
     def __init__(self, source_sentence, samples, model, data_stream,
-                 state, n_best=1, track_n_models=1, trg_ivocab=None,#init_state_fn=None,
+                 state, n_best=1, track_n_models=1, trg_ivocab=None,
                  **kwargs):
         super(BleuValidator, self).__init__(**kwargs)
         self.source_sentence = source_sentence
@@ -127,7 +127,6 @@ class BleuValidator(SimpleExtension, SamplingBase):
         self.state = state
         self.n_best = n_best
         self.track_n_models = track_n_models
-        #self.init_state_fn = init_state_fn
         self.verbose = state.get('val_set_out', None)
 
         # Helpers
@@ -139,8 +138,9 @@ class BleuValidator(SimpleExtension, SamplingBase):
         self.eos_idx = self.vocab[self.eos_sym]
         self.best_models = []
         self.val_bleu_curve = []
-        self.beam_search = BeamSearch(beam_size=self.state['beam_size'],
-                                      samples=samples) #, init_state_fn=self.init_state_fn)
+        self.beam_search = BeamSearch(source_sentence,
+                                      beam_size=self.state['beam_size'],
+                                      samples=samples)
         self.multibleu_cmd = ['perl', self.state['bleu_script'],
                               self.state['val_set_grndtruth'], '<']
 
@@ -197,7 +197,6 @@ class BleuValidator(SimpleExtension, SamplingBase):
             input_ = numpy.tile(seq, (self.state['beam_size'], 1))
 
             # draw sample, checking to ensure we don't get an empty string back
-            import ipdb;ipdb.set_trace()
             trans, costs = \
                 self.beam_search.search(
                     input_values={self.source_sentence: input_},
@@ -278,7 +277,6 @@ class BleuValidator(SimpleExtension, SamplingBase):
             numpy.savez(self.state['prefix'] + 'val_bleu_scores.npz',
                         bleu_scores=self.val_bleu_curve)
             signal.signal(signal.SIGINT, s)
-
 
 
 class ModelInfo:

@@ -66,10 +66,10 @@ def get_states_wmt15_fi_en_TEST():
 
     # Model related
     state['seq_len'] = 50
-    state['enc_nhids'] = 100
-    state['dec_nhids'] = 100
-    state['enc_embed'] = 60
-    state['dec_embed'] = 60
+    state['enc_nhids'] = 1000
+    state['dec_nhids'] = 1000
+    state['enc_embed'] = 620
+    state['dec_embed'] = 620
     state['prefix'] = 'refBlocks3_'
 
     # Optimization related
@@ -85,8 +85,8 @@ def get_states_wmt15_fi_en_TEST():
     state['dropout'] = 1.0
 
     # Vocabulary related
-    state['src_vocab_size'] = 401
-    state['trg_vocab_size'] = 401
+    state['src_vocab_size'] = 50001
+    state['trg_vocab_size'] = 50001
     state['unk_id'] = 1
 
     # Early stopping based on bleu related
@@ -96,13 +96,13 @@ def get_states_wmt15_fi_en_TEST():
     state['val_set_grndtruth'] = '/data/lisatmp3/firatorh/nmt/wmt15/data/fi-en/dev/newsdev2015_TEST.tok.en'
     state['val_set_out'] = 'refBlocks3_adadelta_40k_out.txt'
     state['output_val_set'] = True
-    state['beam_size'] = 2
+    state['beam_size'] = 1
 
     # Timing related
     state['reload'] = False
     state['save_freq'] = 20
-    state['sampling_freq'] = 5
-    state['bleu_val_freq'] = 10
+    state['sampling_freq'] = 1
+    state['bleu_val_freq'] = 1
     state['val_burn_in'] = 0
 
     # Monitoring related
