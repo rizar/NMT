@@ -1,8 +1,9 @@
 # This is the RNNsearch model
-# Works with Blocks commit
-# 7a8bb2f8d20828568aa509c1b9ae6918bcd04129
+# Works with https://github.com/orhanf/blocks/tree/wmt15
+# 0e23b0193f64dc3e56da18605d53d6f5b1352848
 from collections import Counter
 import argparse
+import logging
 import numpy
 import os
 import cPickle
@@ -39,6 +40,8 @@ from blocks.bricks.sequence_generators import (
 from stream_fi_en import masked_stream, state, dev_stream
 from sampling import BleuValidator, Sampler
 
+logger = logging.getLogger(__name__)
+
 
 # Helper class
 class InitializableFeedforwardSequence(FeedforwardSequence, Initializable):
@@ -61,13 +64,6 @@ class LookupFeedbackWMT15(LookupFeedback):
                       self.lookup.apply(outputs_flat_zeros))
         lookup = lookup_flat.reshape(shp+[self.feedback_dim])
         return lookup
-
-
-class SoftmaxEmitterWMT15(SoftmaxEmitter):
-
-    @application
-    def initial_outputs(self, batch_size, *args, **kwargs):
-        return -tensor.ones((batch_size,), dtype='int64')
 
 
 class BidirectionalWMT15(Bidirectional):
@@ -121,9 +117,9 @@ class BidirectionalEncoder(Initializable):
 
         representation = self.bidir.apply(
             merge(self.fwd_fork.apply(embeddings, as_dict=True),
-            {'mask': source_sentence_mask}),
+                  {'mask': source_sentence_mask}),
             merge(self.back_fork.apply(embeddings, as_dict=True),
-            {'mask': source_sentence_mask})
+                  {'mask': source_sentence_mask})
         )
         return representation
 
@@ -170,7 +166,7 @@ class Decoder(Initializable):
         readout = Readout(
             source_names=['states', 'feedback', self.attention.take_glimpses.outputs[0]],
             readout_dim=self.vocab_size,
-            emitter=SoftmaxEmitterWMT15(),
+            emitter=SoftmaxEmitter(initial_output=-1),
             feedback_brick=LookupFeedbackWMT15(vocab_size, embedding_dim),
             post_merge=InitializableFeedforwardSequence(
                 [Bias(dim=state_dim).apply,
@@ -216,7 +212,8 @@ class Decoder(Initializable):
             n_steps=2 * source_sentence.shape[1],
             batch_size=source_sentence.shape[0],
             attended=representation,
-            attended_mask=tensor.ones(source_sentence.shape).T)
+            attended_mask=tensor.ones(source_sentence.shape).T,
+            glimpses=self.attention.take_glimpses.outputs[0])
 
 
 if __name__ == "__main__":
@@ -262,9 +259,9 @@ if __name__ == "__main__":
 
     # Print shapes
     shapes = [param.get_value().shape for param in cg.parameters]
-    print('Parameter shapes')
+    logger.info("Parameter shapes: ")
     for shape, count in Counter(shapes).most_common():
-        print('    {:15}: {}'.format(shape, count))
+        logger.info('    {:15}: {}'.format(shape, count))
 
     # Set up training algorithm
     algorithm = GradientDescent(
@@ -274,10 +271,6 @@ if __name__ == "__main__":
     )
 
     # Set up beam search
-    '''
-    theano.config.compute_test_value = 'warn'
-    sampling_input.tag.test_value = numpy.random.randint(10, size=(5, 7))
-    '''
     sampling_encoder = BidirectionalEncoder(
         state['src_vocab_size'], state['enc_embed'], state['enc_nhids'])
     sampling_decoder = Decoder(state['trg_vocab_size'], state['dec_embed'],
@@ -296,14 +289,12 @@ if __name__ == "__main__":
     # Set up training model
     training_model = Model(cost)
 
-    import ipdb;ipdb.set_trace()
     # Initialize main loop
     main_loop = MainLoop(
         model=training_model,
         algorithm=algorithm,
         data_stream=masked_stream,
         extensions=[
-            #LoadFromDump(state['prefix'] + 'model.pkl'),
             Sampler(model=search_model, state=state, data_stream=masked_stream,
                     every_n_batches=state['sampling_freq']),
             BleuValidator(sampling_input, samples=samples, state=state,
@@ -320,8 +311,12 @@ if __name__ == "__main__":
 
     # Reload model
     file_to_load = state['prefix'] + 'model.pkl'
-    if state['reload'] and os.path.isfile(file_to_load):
-        main_loop = cPickle.load(open(file_to_load))
+    if state['reload']:
+        try:
+            main_loop = cPickle.load(open(file_to_load))
+            logger.info("Model {} loaded!".format(file_to_load))
+        except IOError:
+            logger.info("Error loading model {}!".format(file_to_load))
 
     # Train!
     main_loop.run()
