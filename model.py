@@ -190,7 +190,8 @@ class Decoder(Initializable):
                          'target_sentence_mask', 'target_sentence'],
                  outputs=['cost'])
     def cost(self, representation, source_sentence_mask,
-             target_sentence, target_sentence_mask):
+             target_sentence, target_sentence_mask,
+             attention_regularization=None):
 
         source_sentence_mask = source_sentence_mask.T
         target_sentence = target_sentence.T
@@ -204,7 +205,20 @@ class Decoder(Initializable):
                        'attended_mask': source_sentence_mask}
         )
 
-        return (cost * target_sentence_mask).sum() / target_sentence_mask.shape[1]
+        cost = (cost * target_sentence_mask).sum() / target_sentence_mask.shape[1]
+
+        if attention_regularization is not None:
+            annotation_weights = VariableFilter(name='weights',
+                    bricks=[self.sequence_generator])(ComputationGraph(cost).variables)
+            assert len(annotation_weights)==1
+            annotation_weights = annotation_weights[0]
+
+            attention_penalty = tensor.sqr(1 - annotation_weights.sum(axis=0)).sum() / target_sentence_mask.shape[1]
+            self.add_auxiliary_variable(attention_penalty, name="attention_penalty")
+
+            cost += attention_regularization * attention_penalty
+
+        return cost
 
     @application
     def generate(self, source_sentence, representation):
