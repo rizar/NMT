@@ -59,6 +59,7 @@ class Sampler(SimpleExtension, SamplingBase):
         self.src_ivocab = src_ivocab
         self.trg_ivocab = trg_ivocab
         self.is_synced = False
+        self.sampling_fn = model.get_theano_function()
 
     def do(self, which_callback, *args):
 
@@ -96,8 +97,7 @@ class Sampler(SimpleExtension, SamplingBase):
         target_ = trg_batch[sample_idx, :]
 
         # Sample
-        _1, outputs, _2, _3, costs = (
-            self.model.get_theano_function()(input_))
+        _1, outputs, _2, _3, costs = (self.sampling_fn(input_))
         outputs = outputs.T
         costs = list(costs.T)
 
