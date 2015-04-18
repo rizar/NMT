@@ -1,10 +1,12 @@
 # This is the RNNsearch model
-# Works with Blocks commit
-# 7a8bb2f8d20828568aa509c1b9ae6918bcd04129
+# Works with https://github.com/orhanf/blocks/tree/wmt15
+# 0e23b0193f64dc3e56da18605d53d6f5b1352848
 from collections import Counter
 import argparse
+import logging
 import numpy
 import os
+import cPickle
 import theano
 from theano import tensor
 from toolz import merge
@@ -12,7 +14,6 @@ from picklable_itertools.extras import equizip
 
 from blocks.algorithms import (GradientDescent, StepClipping, AdaDelta,
                                CompositeRule)
-from blocks.dump import load_parameter_values
 from blocks.filter import VariableFilter
 from blocks.main_loop import MainLoop
 from blocks.model import Model
@@ -20,7 +21,7 @@ from blocks.graph import ComputationGraph, apply_dropout, apply_noise
 from blocks.initialization import IsotropicGaussian, Orthogonal, Constant
 from blocks.extensions import Printing
 from blocks.extensions.monitoring import TrainingDataMonitoring
-from blocks.extensions.saveload import Checkpoint, LoadFromDump
+from blocks.extensions.saveload import Checkpoint
 from blocks.extensions.plot import Plot
 
 from blocks.bricks import (Tanh, Maxout, Linear, FeedforwardSequence,
@@ -30,14 +31,16 @@ from blocks.bricks.base import application
 from blocks.bricks.lookup import LookupTable
 from blocks.bricks.parallel import Fork
 from blocks.bricks.recurrent import GatedRecurrent, Bidirectional
+from blocks.select import Selector
 from blocks.bricks.sequence_generators import (
     LookupFeedback, Readout, SoftmaxEmitter,
     SequenceGenerator
 )
-from blocks.select import Selector
 
 from stream_fi_en import masked_stream, state, dev_stream
 from sampling import BleuValidator, Sampler
+
+logger = logging.getLogger(__name__)
 
 
 # Helper class
@@ -61,13 +64,6 @@ class LookupFeedbackWMT15(LookupFeedback):
                       self.lookup.apply(outputs_flat_zeros))
         lookup = lookup_flat.reshape(shp+[self.feedback_dim])
         return lookup
-
-
-class SoftmaxEmitterWMT15(SoftmaxEmitter):
-
-    @application
-    def initial_outputs(self, batch_size, *args, **kwargs):
-        return -tensor.ones((batch_size,), dtype='int64')
 
 
 class BidirectionalWMT15(Bidirectional):
@@ -121,11 +117,33 @@ class BidirectionalEncoder(Initializable):
 
         representation = self.bidir.apply(
             merge(self.fwd_fork.apply(embeddings, as_dict=True),
-            {'mask': source_sentence_mask}),
+                  {'mask': source_sentence_mask}),
             merge(self.back_fork.apply(embeddings, as_dict=True),
-            {'mask': source_sentence_mask})
+                  {'mask': source_sentence_mask})
         )
         return representation
+
+
+class GRUInitialState(GatedRecurrent):
+    def __init__(self, attended_dim, **kwargs):
+        super(GRUInitialState, self).__init__(**kwargs)
+        self.attended_dim = attended_dim
+        self.initial_transformer = MLP(activations=[Tanh()],
+                                       dims=[attended_dim, self.dim],
+                                       name='state_initializer')
+        self.children.append(self.initial_transformer)
+
+    @application
+    def initial_state(self, state_name, batch_size, *args, **kwargs):
+        attended = kwargs['attended']
+        if state_name == 'states':
+            initial_state = self.initial_transformer.apply(
+                attended[0, :, -self.attended_dim:])
+            return initial_state
+        dim = self.get_dim(state_name)
+        if dim == 0:
+            return tensor.zeros((batch_size,))
+        return tensor.zeros((batch_size, dim))
 
 
 class Decoder(Initializable):
@@ -137,7 +155,9 @@ class Decoder(Initializable):
         self.state_dim = state_dim
         self.representation_dim = representation_dim
 
-        self.transition = GatedRecurrent(dim=state_dim, activation=Tanh(), name='decoder')
+        self.transition = GRUInitialState(
+            attended_dim=state_dim, dim=state_dim,
+            activation=Tanh(), name='decoder')
         self.attention = SequenceContentAttention(
             state_names=self.transition.apply.states,
             attended_dim=representation_dim,
@@ -146,7 +166,7 @@ class Decoder(Initializable):
         readout = Readout(
             source_names=['states', 'feedback', self.attention.take_glimpses.outputs[0]],
             readout_dim=self.vocab_size,
-            emitter=SoftmaxEmitterWMT15(),
+            emitter=SoftmaxEmitter(initial_output=-1),
             feedback_brick=LookupFeedbackWMT15(vocab_size, embedding_dim),
             post_merge=InitializableFeedforwardSequence(
                 [Bias(dim=state_dim).apply,
@@ -156,9 +176,6 @@ class Decoder(Initializable):
                  Linear(input_dim=embedding_dim).apply]),
             merged_dim=state_dim)
 
-        self.state_init = MLP(activations=[Tanh()], dims=[state_dim, state_dim],
-                              name='state_initializer')
-
         self.sequence_generator = SequenceGenerator(
             readout=readout,
             transition=self.transition,
@@ -167,7 +184,7 @@ class Decoder(Initializable):
                        if name != 'mask'], prototype=Linear())
         )
 
-        self.children = [self.sequence_generator, self.state_init]
+        self.children = [self.sequence_generator]
 
     @application(inputs=['representation', 'source_sentence_mask',
                          'target_sentence_mask', 'target_sentence'],
@@ -179,12 +196,9 @@ class Decoder(Initializable):
         target_sentence = target_sentence.T
         target_sentence_mask = target_sentence_mask.T
 
-        init_states = self.state_init.apply(representation[0, :, -self.state_dim:])
-
         # Get the cost matrix
         cost = self.sequence_generator.cost_matrix(
-                    **{'states': init_states,
-                       'mask': target_sentence_mask,
+                    **{'mask': target_sentence_mask,
                        'outputs': target_sentence,
                        'attended': representation,
                        'attended_mask': source_sentence_mask}
@@ -194,16 +208,12 @@ class Decoder(Initializable):
 
     @application
     def generate(self, source_sentence, representation):
-
-        # TODO: Check this, seems OK
-        init_states = self.state_init.apply(representation[0, :, -self.state_dim:])
-
         return self.sequence_generator.generate(
             n_steps=2 * source_sentence.shape[1],
             batch_size=source_sentence.shape[0],
-            states=init_states,
             attended=representation,
-            attended_mask=tensor.ones(source_sentence.shape).T)
+            attended_mask=tensor.ones(source_sentence.shape).T,
+            glimpses=self.attention.take_glimpses.outputs[0])
 
 
 if __name__ == "__main__":
@@ -254,8 +264,7 @@ if __name__ == "__main__":
         cg = apply_noise(cg, enc_params+dec_params, state['weight_noise_ff'])
 
     # Initialize model
-    encoder.weights_init = decoder.weights_init = \
-        IsotropicGaussian(state['weight_scale'])
+    encoder.weights_init = decoder.weights_init = IsotropicGaussian(state['weight_scale'])
     encoder.biases_init = decoder.biases_init = Constant(0)
     encoder.push_initialization_config()
     decoder.push_initialization_config()
@@ -266,9 +275,9 @@ if __name__ == "__main__":
 
     # Print shapes
     shapes = [param.get_value().shape for param in cg.parameters]
-    print('Parameter shapes')
+    logger.info("Parameter shapes: ")
     for shape, count in Counter(shapes).most_common():
-        print('    {:15}: {}'.format(shape, count))
+        logger.info('    {:15}: {}'.format(shape, count))
 
     # Set up training algorithm
     algorithm = GradientDescent(
@@ -296,22 +305,12 @@ if __name__ == "__main__":
     # Set up training model
     training_model = Model(cost)
 
-    # Reload model
-    # TODO: This is buggy itself in blocks currently
-    '''
-    import ipdb;ipdb.set_trace()
-    file_to_load = state['prefix'] + 'model.pkl'
-    if state['reload'] and os.path.isfile(file_to_load):
-        training_model.set_param_values(load_parameter_values(file_to_load))
-    '''
-
-    # Train!
+    # Initialize main loop
     main_loop = MainLoop(
         model=training_model,
         algorithm=algorithm,
         data_stream=masked_stream,
         extensions=[
-            #LoadFromDump(state['prefix'] + 'model.pkl'),
             Sampler(model=search_model, state=state, data_stream=masked_stream,
                     every_n_batches=state['sampling_freq']),
             BleuValidator(sampling_input, samples=samples, state=state,
@@ -325,4 +324,15 @@ if __name__ == "__main__":
                        every_n_batches=state['save_freq'])
         ]
     )
+
+    # Reload model
+    file_to_load = state['prefix'] + 'model.pkl'
+    if state['reload']:
+        try:
+            main_loop = cPickle.load(open(file_to_load))
+            logger.info("Model {} loaded!".format(file_to_load))
+        except IOError:
+            logger.info("Error loading model {}!".format(file_to_load))
+
+    # Train!
     main_loop.run()
