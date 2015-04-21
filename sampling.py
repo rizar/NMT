@@ -13,6 +13,11 @@ from subprocess import Popen, PIPE
 
 logger = logging.getLogger(__name__)
 
+def copy_params(lhs, rhs):
+    for i in xrange(len(lhs.children)):
+        copy_params(lhs.children[i], rhs.children[i])
+    for i in xrange(len(lhs.params)):
+        lhs.params[i].set_value(rhs.params[i].get_value())
 
 class SamplingBase(object):
 
@@ -58,15 +63,14 @@ class Sampler(SimpleExtension, SamplingBase):
         self.trg_vocab = trg_vocab
         self.src_ivocab = src_ivocab
         self.trg_ivocab = trg_ivocab
-        self.is_synced = False
         self.sampling_fn = model.get_theano_function()
 
     def do(self, which_callback, *args):
 
         # Get current model parameters
-        if not self.is_synced:
-            self.model.params = self.main_loop.model.params
-            self.is_synced = True
+        copy_params(self.model.top_bricks[0], self.main_loop.model.top_bricks[0])
+        copy_params(self.model.top_bricks[1], self.main_loop.model.top_bricks[1])
+
 
         # Get dictionaries, this may not be the practical way
         sources = self._get_attr_rec(self.main_loop, 'data_stream')
@@ -168,8 +172,8 @@ class BleuValidator(SimpleExtension, SamplingBase):
             return
 
         # Get current model parameters
-        self.model.set_param_values(
-            self.main_loop.model.get_param_values())
+        copy_params(self.model.top_bricks[0], self.main_loop.model.top_bricks[0])
+        copy_params(self.model.top_bricks[1], self.main_loop.model.top_bricks[1])
 
         # Evaluate and save if necessary
         self._save_model(self._evaluate_model())
