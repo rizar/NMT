@@ -13,12 +13,6 @@ from subprocess import Popen, PIPE
 
 logger = logging.getLogger(__name__)
 
-def copy_params(lhs, rhs):
-    for i in xrange(len(lhs.children)):
-        copy_params(lhs.children[i], rhs.children[i])
-    for i in xrange(len(lhs.params)):
-        lhs.params[i].set_value(rhs.params[i].get_value())
-
 class SamplingBase(object):
 
     def _get_attr_rec(self, obj, attr):
@@ -66,11 +60,6 @@ class Sampler(SimpleExtension, SamplingBase):
         self.sampling_fn = model.get_theano_function()
 
     def do(self, which_callback, *args):
-
-        # Get current model parameters
-        copy_params(self.model.top_bricks[0], self.main_loop.model.top_bricks[0])
-        copy_params(self.model.top_bricks[1], self.main_loop.model.top_bricks[1])
-
 
         # Get dictionaries, this may not be the practical way
         sources = self._get_attr_rec(self.main_loop, 'data_stream')
@@ -170,10 +159,6 @@ class BleuValidator(SimpleExtension, SamplingBase):
         if self.main_loop.status['iterations_done'] <= \
                 self.state['val_burn_in']:
             return
-
-        # Get current model parameters
-        copy_params(self.model.top_bricks[0], self.main_loop.model.top_bricks[0])
-        copy_params(self.model.top_bricks[1], self.main_loop.model.top_bricks[1])
 
         # Evaluate and save if necessary
         self._save_model(self._evaluate_model())

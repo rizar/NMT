@@ -263,6 +263,8 @@ if __name__ == "__main__":
         dec_params += Selector(decoder.state_init).get_params().values()
         cg = apply_noise(cg, enc_params+dec_params, state['weight_noise_ff'])
 
+    cost = cg.outputs[0]
+
     # Initialize model
     encoder.weights_init = decoder.weights_init = IsotropicGaussian(state['weight_scale'])
     encoder.biases_init = decoder.biases_init = Constant(0)
@@ -287,19 +289,11 @@ if __name__ == "__main__":
     )
 
     # Set up beam search
-    sampling_encoder = BidirectionalEncoder(
-        state['src_vocab_size'], state['enc_embed'], state['enc_nhids'])
-    sampling_decoder = Decoder(state['trg_vocab_size'], state['dec_embed'],
-                               state['dec_nhids'], state['enc_nhids'] * 2)
-    sampling_encoder.weights_init = sampling_decoder.weights_init = Constant(0)
-    sampling_encoder.biases_init = sampling_decoder.biases_init = Constant(0)
-    sampling_representation = sampling_encoder.apply(
-        sampling_input, tensor.ones(sampling_input.shape))
-    generated = sampling_decoder.generate(
-        sampling_input, sampling_representation)
+    sampling_representation = encoder.apply(sampling_input, tensor.ones(sampling_input.shape))
+    generated = decoder.generate(sampling_input, sampling_representation)
     search_model = Model(generated)
     samples, = VariableFilter(
-        bricks=[sampling_decoder.sequence_generator], name="outputs")(
+        bricks=[decoder.sequence_generator], name="outputs")(
             ComputationGraph(generated[1]))  # generated[1] is the next_outputs
 
     # Set up training model
