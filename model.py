@@ -30,6 +30,7 @@ from blocks.bricks.base import application
 from blocks.bricks.lookup import LookupTable
 from blocks.bricks.parallel import Fork
 from blocks.bricks.recurrent import GatedRecurrent, Bidirectional
+from blocks.select import Selector
 from blocks.bricks.sequence_generators import (
     LookupFeedback, Readout, SoftmaxEmitter,
     SequenceGenerator
@@ -289,6 +290,24 @@ def main(state, tr_stream, dev_stream):
     cost = decoder.cost(encoder.apply(source_sentence, source_sentence_mask),
                         source_sentence_mask, target_sentence, target_sentence_mask)
 
+    cg = ComputationGraph(cost)
+
+    # apply regularizations
+    if state['dropout'] < 1.0:
+        # dropout is applied to the output of maxout in ghog
+        dropout_inputs = [x for x in cg.intermediary_variables
+                          if x.name == 'decoder_maxout_for_dropout_apply_output']
+        cg = apply_dropout(cg, dropout_inputs, state['dropout'])
+
+    if state['weight_noise_ff'] > 0.0:
+        enc_params = Selector(encoder.lookup).get_params().values()
+        enc_params += Selector(encoder.fwd_fork).get_params().values()
+        enc_params += Selector(encoder.back_fork).get_params().values()
+        dec_params = Selector(decoder.sequence_generator.readout).get_params().values()
+        dec_params += Selector(decoder.sequence_generator.fork).get_params().values()
+        dec_params += Selector(decoder.state_init).get_params().values()
+        cg = apply_noise(cg, enc_params+dec_params, state['weight_noise_ff'])
+
     # Initialize model
     encoder.weights_init = decoder.weights_init = IsotropicGaussian(state['weight_scale'])
     encoder.biases_init = decoder.biases_init = Constant(0)
@@ -305,7 +324,7 @@ def main(state, tr_stream, dev_stream):
     if state['dropout'] < 1.0:
         # dropout is applied to the output of maxout in ghog
         dropout_inputs = [x for x in cg.intermediary_variables
-                          if x.name == 'decoder_maxout_for_dropout_apply_output']
+                          if x.name == 'maxout_apply_output']
         cg = apply_dropout(cg, dropout_inputs, state['dropout'])
 
     # Apply weight noise for regularization
