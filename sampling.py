@@ -146,9 +146,14 @@ class BleuValidator(SimpleExtension, SamplingBase):
         self.multibleu_cmd = ['perl', self.state['bleu_script'],
                               self.state['val_set_grndtruth'], '<']
 
+        # Create saving directory if it does not exist
+        if not os.path.exists(self.state['saveto']):
+            os.makedirs(self.state['saveto'])
+
         if self.state['reload']:
             try:
-                bleu_score = numpy.load(self.state['prefix'] + 'val_bleu_scores.npz')
+                bleu_score = numpy.load(os.path.join(self.state['saveto'],
+                                        'val_bleu_scores.npz'))
                 self.val_bleu_curve = bleu_score['bleu_scores'].tolist()
 
                 # Track n best previous bleu scores
@@ -259,7 +264,7 @@ class BleuValidator(SimpleExtension, SamplingBase):
 
     def _save_model(self, bleu_score):
         if self._is_valid_to_save(bleu_score):
-            model = ModelInfo(bleu_score, self.state['prefix'])
+            model = ModelInfo(bleu_score, self.state['saveto'])
 
             # Manage n-best model list first
             if len(self.best_models) >= self.track_n_models:
@@ -276,7 +281,7 @@ class BleuValidator(SimpleExtension, SamplingBase):
             s = signal.signal(signal.SIGINT, signal.SIG_IGN)
             logger.info("Saving new model {}".format(model.path))
             numpy.savez(model.path, **self.main_loop.model.get_param_values())
-            numpy.savez(self.state['prefix'] + 'val_bleu_scores.npz',
+            numpy.savez(os.path.join(self.state['saveto'],'val_bleu_scores.npz'),
                         bleu_scores=self.val_bleu_curve)
             signal.signal(signal.SIGINT, s)
 
@@ -287,5 +292,7 @@ class ModelInfo:
         self.path = self._generate_path(path)
 
     def _generate_path(self, path):
-        return '%sbest_bleu_model_%d_BLEU%.2f.npz' % \
-            (path, int(time.time()), self.bleu_score) if path else None
+        gen_path = os.path.join(
+            path, 'best_bleu_model_%d_BLEU%.2f.npz' %
+            (int(time.time()), self.bleu_score) if path else None)
+        return gen_path

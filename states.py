@@ -20,7 +20,7 @@ def get_states_wmt15_fi_en_40k():
     state['dec_nhids'] = 1000
     state['enc_embed'] = 620
     state['dec_embed'] = 620
-    state['prefix'] = 'refBlocks3_'
+    state['saveto'] = 'refBlocks3'
 
     # Optimization related
     state['batch_size'] = 80
@@ -36,6 +36,7 @@ def get_states_wmt15_fi_en_40k():
 
     # Vocabulary/dataset related
     basedir = '/data/lisatmp3/firatorh/nmt/wmt15/data/fi-en/processed/'
+    state['stream'] = 'fi-en'
     state['src_vocab'] = basedir + 'vocab.fi.pkl'
     state['trg_vocab'] = basedir + 'vocab.en.pkl'
     state['src_data'] = basedir + 'all.tok.clean.shuf.seg1.fi-en.fi'
@@ -49,19 +50,19 @@ def get_states_wmt15_fi_en_40k():
     state['bleu_script'] = '/data/lisatmp3/firatorh/turkishParallelCorpora/iwslt14/scripts/multi-bleu.perl'
     state['val_set'] = '/data/lisatmp3/firatorh/nmt/wmt15/data/fi-en/dev/newsdev2015_1.tok.seg.fi'
     state['val_set_grndtruth'] = '/data/lisatmp3/firatorh/nmt/wmt15/data/fi-en/dev/newsdev2015_1.tok.en'
-    state['val_set_out'] = 'refBlocks3_adadelta_40k_out.txt'
+    state['val_set_out'] = 'refBlocks3/adadelta_40k_out.txt'
     state['output_val_set'] = True
     state['beam_size'] = 20
 
     # Timing related
     state['reload'] = True
-    state['save_freq'] = 750
-    state['sampling_freq'] = 13
+    state['save_freq'] = 50
+    state['sampling_freq'] = 1
     state['bleu_val_freq'] = 2000
     state['val_burn_in'] = 50000
 
     # Monitoring related
-    state['hook_samples'] = 2
+    state['hook_samples'] = 1
 
     #return ReadOnlyDict(state)
     return state
@@ -76,7 +77,7 @@ def get_states_wmt15_fi_en_TEST():
     state['dec_nhids'] = 100
     state['enc_embed'] = 62
     state['dec_embed'] = 62
-    state['prefix'] = 'refBlocks3_'
+    state['saveto'] = 'refBlocks3_TEST'
 
     # Optimization related
     state['batch_size'] = 8
@@ -92,6 +93,7 @@ def get_states_wmt15_fi_en_TEST():
 
     # Vocabulary/dataset related
     basedir = '/data/lisatmp3/firatorh/nmt/wmt15/data/fi-en/processed/'
+    state['stream'] = 'fi-en'
     state['src_vocab'] = basedir + 'vocab.fi.pkl'
     state['trg_vocab'] = basedir + 'vocab.en.pkl'
     state['src_data'] = basedir + 'all.tok.clean.shuf.seg1.fi-en.fi'
@@ -105,14 +107,14 @@ def get_states_wmt15_fi_en_TEST():
     state['bleu_script'] = '/data/lisatmp3/firatorh/turkishParallelCorpora/iwslt14/scripts/multi-bleu.perl'
     state['val_set'] = '/data/lisatmp3/firatorh/nmt/wmt15/data/fi-en/dev/newsdev2015_TEST.tok.seg.fi'
     state['val_set_grndtruth'] = '/data/lisatmp3/firatorh/nmt/wmt15/data/fi-en/dev/newsdev2015_TEST.tok.en'
-    state['val_set_out'] = 'refBlocks3_adadelta_40k_out.txt'
+    state['val_set_out'] = 'refBlocks3_TEST/validation_out.txt'
     state['output_val_set'] = True
     state['beam_size'] = 2
 
     # Timing related
     state['reload'] = True
     state['save_freq'] = 1
-    state['sampling_freq'] = 1
+    state['sampling_freq'] = 5
     state['bleu_val_freq'] = 10
     state['val_burn_in'] = 0
 

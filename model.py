@@ -4,9 +4,7 @@
 from collections import Counter
 import argparse
 import logging
-import numpy
-import os
-import cPickle
+import pprint
 import theano
 from theano import tensor
 from toolz import merge
@@ -14,15 +12,15 @@ from picklable_itertools.extras import equizip
 
 from blocks.algorithms import (GradientDescent, StepClipping, AdaDelta,
                                CompositeRule)
-from blocks.dump import load_parameter_values
+from blocks.dump import MainLoopDumpManager
 from blocks.filter import VariableFilter
 from blocks.main_loop import MainLoop
 from blocks.model import Model
-from blocks.graph import ComputationGraph
+from blocks.graph import ComputationGraph, apply_noise, apply_dropout
 from blocks.initialization import IsotropicGaussian, Orthogonal, Constant
 from blocks.extensions import Printing
 from blocks.extensions.monitoring import TrainingDataMonitoring
-from blocks.extensions.saveload import Checkpoint, LoadFromDump
+from blocks.extensions.saveload import LoadFromDump, Dump
 from blocks.extensions.plot import Plot
 
 from blocks.bricks import (Tanh, Maxout, Linear, FeedforwardSequence,
@@ -36,16 +34,74 @@ from blocks.bricks.sequence_generators import (
     LookupFeedback, Readout, SoftmaxEmitter,
     SequenceGenerator
 )
+from blocks.select import Selector
 
-from stream_fi_en import masked_stream, state, dev_stream
+import states
+import stream
+import stream_fi_en
+
 from sampling import BleuValidator, Sampler
 
 logger = logging.getLogger(__name__)
+
+# Get the arguments
+parser = argparse.ArgumentParser()
+parser.add_argument("--proto",  default="get_states_wmt15_fi_en_40k",
+                    help="Prototype state to use for state")
+args = parser.parse_args()
+
+# Make state global, nasty workaround since parameterizing stream
+# will cause erroneous picklable behaviour, find a better solution
+state = getattr(states, args.proto)()
+
+
+# dictionary mapping stream name to stream getters
+streams = {'fi-en': stream_fi_en,
+           'en-fr': stream}
 
 
 # Helper class
 class InitializableFeedforwardSequence(FeedforwardSequence, Initializable):
     pass
+
+
+class MainLoopDumpManagerWMT15(MainLoopDumpManager):
+
+    def load_to(self, main_loop):
+        """Loads the dump from the root folder into the main loop.
+
+        Only difference from super().load_to is the exception handling
+        for each step separately.
+        """
+        try:
+            logger.info("Loading model parameters...")
+            params = self.load_parameters()
+            main_loop.model.set_param_values(params)
+            for p, v in params.iteritems():
+                logger.info("Loaded {:15}: {}".format(v.shape, p))
+            logger.info("Number of parameters loaded: {}".format(len(params)))
+        except Exception as e:
+            logger.error("Error {0}".format(str(e)))
+
+        try:
+            logger.info("Loading iteration state...")
+            main_loop.iteration_state = self.load_iteration_state()
+        except Exception as e:
+            logger.error("Error {0}".format(str(e)))
+
+        try:
+            logger.info("Loading log...")
+            main_loop.log = self.load_log()
+        except Exception as e:
+            logger.error("Error {0}".format(str(e)))
+
+
+class LoadFromDumpWMT15(LoadFromDump):
+    """Wrapper to use MainLoopDumpManagerWMT15"""
+
+    def __init__(self, state_path, **kwargs):
+        super(LoadFromDumpWMT15, self).__init__(state_path, **kwargs)
+        self.manager = MainLoopDumpManagerWMT15(state_path)
 
 
 class LookupFeedbackWMT15(LookupFeedback):
@@ -169,11 +225,11 @@ class Decoder(Initializable):
             emitter=SoftmaxEmitter(initial_output=-1),
             feedback_brick=LookupFeedbackWMT15(vocab_size, embedding_dim),
             post_merge=InitializableFeedforwardSequence(
-                [Bias(dim=state_dim).apply,
-                 Maxout(num_pieces=2).apply,
+                [Bias(dim=state_dim, name='maxout_bias').apply,
+                 Maxout(num_pieces=2, name='maxout').apply,
                  Linear(input_dim=state_dim / 2, output_dim=embedding_dim,
-                        use_bias=False).apply,
-                 Linear(input_dim=embedding_dim).apply]),
+                        use_bias=False, name='softmax0').apply,
+                 Linear(input_dim=embedding_dim, name='softmax1').apply]),
             merged_dim=state_dim)
 
         self.sequence_generator = SequenceGenerator(
@@ -216,26 +272,14 @@ class Decoder(Initializable):
             glimpses=self.attention.take_glimpses.outputs[0])
 
 
-if __name__ == "__main__":
+def main(state, tr_stream, dev_stream):
 
     # Create Theano variables
-    source_sentence = tensor.lmatrix('finnish')
-    source_sentence_mask = tensor.matrix('finnish_mask')
-    target_sentence = tensor.lmatrix('english')
-    target_sentence_mask = tensor.matrix('english_mask')
+    source_sentence = tensor.lmatrix('source')
+    source_sentence_mask = tensor.matrix('source_mask')
+    target_sentence = tensor.lmatrix('target')
+    target_sentence_mask = tensor.matrix('target_mask')
     sampling_input = tensor.lmatrix('input')
-
-    # Test values
-    '''
-    theano.config.compute_test_value = 'warn'
-    source_sentence.tag.test_value = numpy.random.randint(10, size=(10, 10))
-    target_sentence.tag.test_value = numpy.random.randint(10, size=(10, 10))
-    source_sentence_mask.tag.test_value = \
-        numpy.random.rand(10, 10).astype('float32')
-    target_sentence_mask.tag.test_value = \
-        numpy.random.rand(10, 10).astype('float32')
-    sampling_input.tag.test_value = numpy.random.randint(10, size=(10, 10))
-    '''
 
     # Construct model
     encoder = BidirectionalEncoder(state['src_vocab_size'], state['enc_embed'],
@@ -257,11 +301,37 @@ if __name__ == "__main__":
 
     cg = ComputationGraph(cost)
 
+    # apply dropout for regularization
+    if state['dropout'] < 1.0:
+        # dropout is applied to the output of maxout in ghog
+        dropout_inputs = [x for x in cg.intermediary_variables
+                          if x.name == 'decoder_maxout_for_dropout_apply_output']
+        cg = apply_dropout(cg, dropout_inputs, state['dropout'])
+
+    # Apply weight noise for regularization
+    if state['weight_noise_ff'] > 0.0:
+        enc_params = Selector(encoder.lookup).get_params().values()
+        enc_params += Selector(encoder.fwd_fork).get_params().values()
+        enc_params += Selector(encoder.back_fork).get_params().values()
+        dec_params = Selector(decoder.sequence_generator.readout).get_params().values()
+        dec_params += Selector(decoder.sequence_generator.fork).get_params().values()
+        dec_params += Selector(decoder.state_init).get_params().values()
+        cg = apply_noise(cg, enc_params+dec_params, state['weight_noise_ff'])
+
     # Print shapes
     shapes = [param.get_value().shape for param in cg.parameters]
     logger.info("Parameter shapes: ")
     for shape, count in Counter(shapes).most_common():
         logger.info('    {:15}: {}'.format(shape, count))
+    logger.info("Total number of parameters: {}".format(len(shapes)))
+
+    # Print parameter names
+    enc_dec_param_dict = merge(Selector(encoder).get_params(),
+                               Selector(decoder).get_params())
+    logger.info("Parameter names: ")
+    for name, value in enc_dec_param_dict.iteritems():
+        logger.info('    {:15}: {}'.format(value.get_value().shape, name))
+    logger.info("Total number of parameters: {}".format(len(enc_dec_param_dict)))
 
     # Set up training algorithm
     algorithm = GradientDescent(
@@ -270,53 +340,51 @@ if __name__ == "__main__":
                                  eval(state['step_rule'])()])
     )
 
-    # Set up beam search
-    sampling_encoder = BidirectionalEncoder(
-        state['src_vocab_size'], state['enc_embed'], state['enc_nhids'])
-    sampling_decoder = Decoder(state['trg_vocab_size'], state['dec_embed'],
-                               state['dec_nhids'], state['enc_nhids'] * 2)
-    sampling_encoder.weights_init = sampling_decoder.weights_init = Constant(0)
-    sampling_encoder.biases_init = sampling_decoder.biases_init = Constant(0)
-    sampling_representation = sampling_encoder.apply(
+    # Set up beam search and sampling computation graphs
+    sampling_representation = encoder.apply(
         sampling_input, tensor.ones(sampling_input.shape))
-    generated = sampling_decoder.generate(
-        sampling_input, sampling_representation)
+    generated = decoder.generate(sampling_input, sampling_representation)
     search_model = Model(generated)
     samples, = VariableFilter(
-        bricks=[sampling_decoder.sequence_generator], name="outputs")(
+        bricks=[decoder.sequence_generator], name="outputs")(
             ComputationGraph(generated[1]))  # generated[1] is the next_outputs
 
     # Set up training model
     training_model = Model(cost)
 
+    # Set extensions
+    extensions = [
+        Sampler(model=search_model, state=state, data_stream=tr_stream,
+                every_n_batches=state['sampling_freq']),
+        BleuValidator(sampling_input, samples=samples, state=state,
+                      model=search_model, data_stream=dev_stream,
+                      every_n_batches=state['bleu_val_freq']),
+        TrainingDataMonitoring([cost], after_batch=True),
+        #Plot('En-Fr', channels=[['decoder_cost_cost']],
+        #     after_batch=True),
+        Printing(after_batch=True),
+        Dump(state['saveto'], every_n_batches=state['save_freq'])
+    ]
+
+    # Reload model if necessary
+    if state['reload']:
+        extensions += [LoadFromDumpWMT15(state['saveto'])]
+
     # Initialize main loop
     main_loop = MainLoop(
         model=training_model,
         algorithm=algorithm,
-        data_stream=masked_stream,
-        extensions=[
-            Sampler(model=search_model, state=state, data_stream=masked_stream,
-                    every_n_batches=state['sampling_freq']),
-            BleuValidator(sampling_input, samples=samples, state=state,
-                          model=search_model, data_stream=dev_stream,
-                          every_n_batches=state['bleu_val_freq']),
-            TrainingDataMonitoring([cost], after_batch=True),
-            #Plot('En-Fr', channels=[['decoder_cost_cost']],
-            #     after_batch=True),
-            Printing(after_batch=True),
-            Checkpoint(state['prefix'] + 'model.pkl',
-                       every_n_batches=state['save_freq'])
-        ]
+        data_stream=tr_stream,
+        extensions=extensions
     )
-
-    # Reload model
-    file_to_load = state['prefix'] + 'model.pkl'
-    if state['reload']:
-        try:
-            main_loop = cPickle.load(open(file_to_load))
-            logger.info("Model {} loaded!".format(file_to_load))
-        except IOError:
-            logger.info("Error loading model {}!".format(file_to_load))
 
     # Train!
     main_loop.run()
+
+
+if __name__ == "__main__":
+    logger.info("Model options:\n{}".format(pprint.pformat(state)))
+    tr_stream, dev_stream = [streams[state['stream']].masked_stream,
+                             streams[state['stream']].dev_stream]
+    main(state, tr_stream, dev_stream)
+
