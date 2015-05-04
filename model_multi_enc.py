@@ -7,6 +7,7 @@ import logging
 import pprint
 import theano
 from theano import tensor
+from theano.ifelse import ifelse
 from toolz import merge
 from picklable_itertools.extras import equizip
 
@@ -75,13 +76,21 @@ class MultiEncoder(Initializable):
         self.children = self.encoders
 
     @application
-    def apply(self, source_sentences, source_masks):
+    def apply(self, source_sentences, source_masks, stream_id):
         representations = []
         for i, (sentence, mask) in enumerate(
                 zip(source_sentences, source_masks)):
-            # TODO: add the condition to check if batch has all -1 meaning the
-            # source batch does not exist, and set representation to zero
-            representations.append(self.encoders[i].apply(sentence, mask))
+            rep = ifelse(
+                theano.tensor.all(theano.tensor.eq(sentence, -1.0)),
+                theano.tensor.alloc(
+                    0., sentence.shape[1], sentence.shape[0],
+                    self.encoders[0].state_dim),
+                self.encoders[i].apply(sentence, mask)
+            )
+            # TODO: this is a dummy operation to include stream_id in the
+            # computational graph, fix this respectively for attention
+            rep += stream_id * 0.
+            representations.append(rep)
         return representations
 
 
@@ -146,6 +155,7 @@ class BidirectionalEncoder(Initializable):
 def main(state, tr_stream, dev_stream):
 
     # Create Theano variables
+    stream_id = tensor.scalar('stream_id', dtype=theano.config.floatX)
     source_sentences = [tensor.lmatrix('source_0'), tensor.lmatrix('source_1')]
     source_masks = [tensor.matrix('source_0_mask'), tensor.matrix('source_1_mask')]
     target_sentence = tensor.lmatrix('target')
@@ -153,7 +163,7 @@ def main(state, tr_stream, dev_stream):
 
     # Construct model
     multi_encoder = MultiEncoder(state, source_sentences, source_masks)
-    representations = multi_encoder.apply(source_sentences, source_masks)
+    representations = multi_encoder.apply(source_sentences, source_masks, stream_id)
 
     # Initialize model
     multi_encoder.weights_init = IsotropicGaussian(state['weight_scale'])
@@ -164,16 +174,19 @@ def main(state, tr_stream, dev_stream):
     multi_encoder.initialize()
 
     # This block evaluates the encoder annotations
-    f = theano.function(source_sentences + source_masks, representations)
+    f = theano.function(source_sentences + source_masks + [stream_id],
+                        representations)
     import numpy
     s1 = numpy.random.randint(10, size=(10, 20))
     s2 = numpy.random.randint(10, size=(10, 30))
     m1 = numpy.random.rand(10, 20).astype('float32')
     m2 = numpy.random.rand(10, 30).astype('float32')
-    rep_ = f(s1, s2, m1, m2)
+    rep_ = f(s1, s2, m1, m2, 0)
 
     # Create a dummy cost
-    cost = theano.tensor.concatenate(representations, axis=0).sum()
+    cost = theano.tensor.concatenate(representations, axis=0).sum() +\
+           (target_sentence * target_sentence_mask).sum()
+    cost.name = 'cost'
 
     cg = ComputationGraph(cost)
 
@@ -191,6 +204,7 @@ def main(state, tr_stream, dev_stream):
     extensions = [
         TrainingDataMonitoring([cost], after_batch=True),
         Printing(after_batch=True),
+        stream_fide_en.PrintMultiStream(after_batch=True),
         Dump(state['saveto'], every_n_batches=state['save_freq'])
     ]
 

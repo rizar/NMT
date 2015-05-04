@@ -8,6 +8,9 @@
 import cPickle
 import numpy
 import six
+import theano
+
+from blocks.extensions import SimpleExtension
 
 from fuel.datasets import TextFile
 from fuel.schemes import ConstantScheme
@@ -22,6 +25,22 @@ from model_multi_enc import state
 num_encs = state['num_encs']
 
 
+class PrintMultiStream(SimpleExtension):
+    """Prints number of batches seen for each data stream"""
+    def __init__(self, **kwargs):
+        super(PrintMultiStream, self).__init__(**kwargs)
+
+    def do(self, which_callback, *args):
+        counters = self.main_loop.data_stream.training_counter
+        sid = self.main_loop.data_stream.curr_id
+        msg = ['source_{}:[{}]'.format(i, c) for i, c in enumerate(counters)
+               if i != len(counters) - 1]
+        msg += ['source_joint:[{}]'.format(counters[-1])]
+        print("Multi-stream status:")
+        print "\t", "Using stream: source_{}".format(sid)
+        print "\t", " ".join(msg)
+
+
 class MultiEncStream(Transformer, six.Iterator):
 
     def __init__(self, streams, schedule):
@@ -29,15 +48,15 @@ class MultiEncStream(Transformer, six.Iterator):
 
         self.streams = streams
         self.schedule = numpy.asarray(schedule)
-        self.counter = numpy.zeros_like(self.schedule)
+        self.counters = numpy.zeros_like(self.schedule)
         self.curr_id = 0  # this is the state of transformer
         self.curr_epoch_iterator = None
         self.num_encs = len(streams) - 1
+        self.training_counter = numpy.zeros_like(self.counters)
 
         # Get all epoch iterators
-        self.epoch_iterators = [self.streams[i]
-                                .get_epoch_iterator(as_dict=True)
-                                for i in xrange(self.num_encs)]
+        self.epoch_iterators = [st.get_epoch_iterator(as_dict=True)
+                                for st in self.streams]
 
         # Initialize epoch iterator id to zero
         self.curr_epoch_iterator = self.epoch_iterators[0]
@@ -47,32 +66,35 @@ class MultiEncStream(Transformer, six.Iterator):
 
     def __next__(self):
         batch = next(self.curr_epoch_iterator)
-        if self.curr_id >= 0:
-            self._add_missing_source(batch)
-        self._update_counter()
+        batch['stream_id'] = self.curr_id
+        if self.curr_id < self.num_encs:
+            self._add_missing_sources(batch)
+        self._update_counters()
+        return batch
 
-    def _add_missing_source(self, batch):
+    def _add_missing_sources(self, batch):
 
         # Find missing source language
         missing_idx = [k for k in xrange(self.num_encs)
                        if 'source_%d' % k not in batch.keys()]
 
-        # Add sequence and mask of minus ones
+        # Add sequence of -1  and mask of zeros
         for idx in missing_idx:
-            batch['source_%d' % k] = numpy.tile(
-                    -1., batch['source_%d' % self.curr_id].shape)
-            batch['source_mask_%d' % k] = numpy.tile(
-                    -1., batch['source_%d' % self.curr_id].shape)
+            ref_seq = batch['source_%d' % self.curr_id]
+            ref_msk = batch['source_%d_mask' % self.curr_id]
+            batch['source_%d' % idx] = numpy.zeros_like(ref_seq) * -1
+            batch['source_%d_mask' % idx] = numpy.zeros_like(ref_msk) * 0.
 
-    def _update_counter(self):
-
+    def _update_counters(self):
         # Increment counter and check schedule
-        self.counter[self.curr_id] += 1
-        vict_idx = numpy.where(self.counter // self.schedule)[0]
+        self.training_counter[self.curr_id] += 1
+        self.counters[self.curr_id] += 1
+        vict_idx = numpy.where(self.counters // self.schedule)[0]
 
         # Change stream
-        if not vict_idx:
-            self.curr_id = (vict_idx + 1) % len(self.streams)
+        if len(vict_idx):
+            self.counters[self.curr_id] = 0
+            self.curr_id = (vict_idx[0] + 1) % len(self.streams)
             self.curr_epoch_iterator = self.epoch_iterators[self.curr_id]
 
 
