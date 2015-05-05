@@ -33,9 +33,7 @@ class PrintMultiStream(SimpleExtension):
     def do(self, which_callback, *args):
         counters = self.main_loop.data_stream.training_counter
         sid = self.main_loop.data_stream.curr_id
-        msg = ['source_{}:[{}]'.format(i, c) for i, c in enumerate(counters)
-               if i != len(counters) - 1]
-        msg += ['source_joint:[{}]'.format(counters[-1])]
+        msg = ['source_{}:[{}]'.format(i, c) for i, c in enumerate(counters)]
         print("Multi-stream status:")
         print "\t", "Using stream: source_{}".format(sid)
         print "\t", " ".join(msg)
@@ -43,16 +41,16 @@ class PrintMultiStream(SimpleExtension):
 
 class MultiEncStream(Transformer, six.Iterator):
 
-    def __init__(self, streams, schedule):
-        '''Assumes joint stream is the last one'''
+    def __init__(self, streams, schedule, batch_sizes):
 
         self.streams = streams
         self.schedule = numpy.asarray(schedule)
         self.counters = numpy.zeros_like(self.schedule)
         self.curr_id = 0  # this is the state of transformer
         self.curr_epoch_iterator = None
-        self.num_encs = len(streams) - 1
+        self.num_encs = len(streams)
         self.training_counter = numpy.zeros_like(self.counters)
+        self.batch_sizes = batch_sizes
 
         # Get all epoch iterators
         self.epoch_iterators = [st.get_epoch_iterator(as_dict=True)
@@ -66,11 +64,20 @@ class MultiEncStream(Transformer, six.Iterator):
 
     def __next__(self):
         batch = next(self.curr_epoch_iterator)
-        batch['stream_id'] = self.curr_id
-        if self.curr_id < self.num_encs:
-            self._add_missing_sources(batch)
+        batch['src_selector'] = self.curr_id
+        self._add_selectors(batch)
+        self._add_missing_sources(batch)
         self._update_counters()
         return batch
+
+    def _add_selectors(self, batch):
+        """Set src and target selector vectors"""
+        bs = self.batch_sizes[self.curr_id]
+        batch['src_selector'] = numpy.zeros(
+            (bs, self.num_encs)).astype(theano.config.floatX)
+        batch['src_selector'][:, self.curr_id] = 1.
+        batch['trg_selector'] = numpy.tile(
+            1., (bs, 1)).astype(theano.config.floatX)
 
     def _add_missing_sources(self, batch):
 
@@ -122,7 +129,7 @@ def _oov_to_unk_multi(sentence_pair, src_vocab_sizes=None,
                  [[x if x < trg_vocab_size else unk_id for x in sentence_pair[1]]])
 # *****************************************************************************
 
-# Prepare source vocabs and files, there are 2 vocabs and 3 data files
+# Prepare source vocabs and files, there are 2 vocabs and 2 data files
 src_vocabs = [state['src_vocab_%d' % x] for x in xrange(num_encs)]
 src_files = [state['src_data_%d' % x] for x in xrange(num_encs)]
 
@@ -161,40 +168,6 @@ for i in xrange(num_encs):
     masked_stream = Padding(stream)
     ind_streams.append(masked_stream)
 
-
-# Build the joint stream !
-joint_src_files = [state['src_data_joint_%d' % i]
-                   for i in xrange(num_encs)]
-joint_trg_file = state['trg_data_joint']
-
-joint_src_datasets = [TextFile([ff], cPickle.load(open(vv)), None)
-                      for ff, vv in zip(joint_src_files, src_vocabs)]
-
-joint_trg_dataset = TextFile([joint_trg_file],
-                             cPickle.load(open(trg_vocab)), None)
-
-# Build the preprocessing pipeline for individaul streams
-stream = Merge([st.get_example_stream()
-                for st in joint_src_datasets + [joint_trg_dataset]],
-               tuple(['source_%d' % ii for ii in xrange(num_encs)] +
-                     ['target']))
-
-stream = Filter(stream, predicate=_too_long,
-                predicate_args={'seq_len': state['seq_len']})
-stream = Mapping(stream, _oov_to_unk_multi,
-                 src_vocab_sizes=[state['src_vocab_size_%d' % i]
-                                  for i in xrange(num_encs)],
-                 trg_vocab_size=state['trg_vocab_size'],
-                 unk_id=state['unk_id'])
-stream = Batch(stream,
-               iteration_scheme=ConstantScheme(
-                   state['batch_size_joint']*state['sort_k_batches']))
-
-stream = Mapping(stream, SortMapping(_length))
-stream = Unpack(stream)
-stream = Batch(stream, iteration_scheme=ConstantScheme(
-               state['batch_size_joint']))
-joint_stream = Padding(stream)
-
-multi_enc_stream = MultiEncStream(ind_streams + [joint_stream],
-                                  schedule=[1, 2, 3])
+multi_enc_stream = MultiEncStream(ind_streams, schedule=state['schedule'],
+                                  batch_sizes=[state['batch_size_enc_%d' % i]
+                                              for i in xrange(num_encs)]  )

@@ -76,7 +76,7 @@ class MultiEncoder(Initializable):
         self.children = self.encoders
 
     @application
-    def apply(self, source_sentences, source_masks, stream_id):
+    def apply(self, source_sentences, source_masks, src_selector, trg_selector):
         representations = []
         for i, (sentence, mask) in enumerate(
                 zip(source_sentences, source_masks)):
@@ -89,7 +89,7 @@ class MultiEncoder(Initializable):
             )
             # TODO: this is a dummy operation to include stream_id in the
             # computational graph, fix this respectively for attention
-            rep += stream_id * 0.
+            rep += src_selector.sum() * 0. + trg_selector.sum() * 0.
             representations.append(rep)
         return representations
 
@@ -155,7 +155,8 @@ class BidirectionalEncoder(Initializable):
 def main(state, tr_stream, dev_stream):
 
     # Create Theano variables
-    stream_id = tensor.scalar('stream_id', dtype=theano.config.floatX)
+    src_selector = tensor.matrix('src_selector', dtype=theano.config.floatX)
+    trg_selector = tensor.matrix('trg_selector', dtype=theano.config.floatX)
     source_sentences = [tensor.lmatrix('source_0'), tensor.lmatrix('source_1')]
     source_masks = [tensor.matrix('source_0_mask'), tensor.matrix('source_1_mask')]
     target_sentence = tensor.lmatrix('target')
@@ -163,7 +164,8 @@ def main(state, tr_stream, dev_stream):
 
     # Construct model
     multi_encoder = MultiEncoder(state, source_sentences, source_masks)
-    representations = multi_encoder.apply(source_sentences, source_masks, stream_id)
+    representations = multi_encoder.apply(source_sentences, source_masks,
+                                          src_selector, trg_selector)
 
     # Initialize model
     multi_encoder.weights_init = IsotropicGaussian(state['weight_scale'])
@@ -172,16 +174,6 @@ def main(state, tr_stream, dev_stream):
     for i, _ in enumerate(source_sentences):
         multi_encoder.encoders[i].bidir.prototype.weights_init = Orthogonal()
     multi_encoder.initialize()
-
-    # This block evaluates the encoder annotations
-    f = theano.function(source_sentences + source_masks + [stream_id],
-                        representations)
-    import numpy
-    s1 = numpy.random.randint(10, size=(10, 20))
-    s2 = numpy.random.randint(10, size=(10, 30))
-    m1 = numpy.random.rand(10, 20).astype('float32')
-    m2 = numpy.random.rand(10, 30).astype('float32')
-    rep_ = f(s1, s2, m1, m2, 0)
 
     # Create a dummy cost
     cost = theano.tensor.concatenate(representations, axis=0).sum() +\

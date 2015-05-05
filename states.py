@@ -142,11 +142,11 @@ def get_states_wmt15_fide_en_TEST():
     # Optimization related
     state['batch_size_enc_0'] = 8
     state['batch_size_enc_1'] = 8
-    state['batch_size_joint'] = 8
     state['sort_k_batches'] = 12
     state['step_rule'] = 'AdaDelta'
     state['step_clipping'] = 10
     state['weight_scale'] = 0.01
+    state['schedule'] = [2, 3]
 
     # Regularization related
     state['weight_noise_ff'] = False
@@ -160,15 +160,12 @@ def get_states_wmt15_fide_en_TEST():
     state['src_vocab_1'] = basedir + 'vocab.fi.pkl'
     state['src_data_0'] = basedir + 'all.tok.clean.shuf.seg1.fi-en.fi'
     state['src_data_1'] = basedir + 'all.tok.clean.shuf.seg1.fi-en.fi'
-    state['src_data_joint_0'] = basedir + 'all.tok.clean.shuf.seg1.fi-en.fi'
-    state['src_data_joint_1'] = basedir + 'all.tok.clean.shuf.seg1.fi-en.fi'
     state['src_vocab_size_0'] = 501
     state['src_vocab_size_1'] = 501
 
     state['trg_vocab'] = basedir + 'vocab.en.pkl'
     state['trg_data_0'] = basedir + 'all.tok.clean.shuf.fi-en.en'
     state['trg_data_1'] = basedir + 'all.tok.clean.shuf.fi-en.en'
-    state['trg_data_joint'] = basedir + 'all.tok.clean.shuf.fi-en.en'
     state['trg_vocab_size'] = 501
 
     state['unk_id'] = 1
