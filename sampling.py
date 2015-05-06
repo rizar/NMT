@@ -27,7 +27,7 @@ class SamplingBase(object):
             return len(seq)
 
     def _oov_to_unk(self, seq):
-        return [x if x < self.state['src_vocab_size'] else self.unk_idx
+        return [x if x < self.config['src_vocab_size'] else self.unk_idx
                 for x in seq]
 
     def _parse_input(self, line):
@@ -36,7 +36,7 @@ class SamplingBase(object):
         seq = numpy.zeros(seqlen+1, dtype='int64')
         for idx, sx in enumerate(seqin):
             seq[idx] = self.vocab.get(sx, self.unk_idx)
-            if seq[idx] >= self.state['src_vocab_size']:
+            if seq[idx] >= self.config['src_vocab_size']:
                 seq[idx] = self.unk_idx
         seq[-1] = self.eos_idx
         return seq
@@ -47,12 +47,12 @@ class SamplingBase(object):
 
 class Sampler(SimpleExtension, SamplingBase):
 
-    def __init__(self, model, data_stream, state,
+    def __init__(self, model, data_stream, config,
                  src_vocab=None, trg_vocab=None, src_ivocab=None,
                  trg_ivocab=None, **kwargs):
         super(Sampler, self).__init__(**kwargs)
         self.model = model
-        self.state = state
+        self.config = config
         self.data_stream = data_stream
         self.src_vocab = src_vocab
         self.trg_vocab = trg_vocab
@@ -88,8 +88,8 @@ class Sampler(SimpleExtension, SamplingBase):
         #  can be different
         batch = args[0]
 
-        sample_idx = numpy.random.choice(self.state['batch_size'],
-                        self.state['hook_samples'], replace=False)
+        sample_idx = numpy.random.choice(self.config['batch_size'],
+                        self.config['hook_samples'], replace=False)
         src_batch = batch[self.main_loop.data_stream.mask_sources[0]]
         trg_batch = batch[self.main_loop.data_stream.mask_sources[1]]
 
@@ -119,17 +119,17 @@ class Sampler(SimpleExtension, SamplingBase):
 class BleuValidator(SimpleExtension, SamplingBase):
 
     def __init__(self, source_sentence, samples, model, data_stream,
-                 state, n_best=1, track_n_models=1, trg_ivocab=None,
+                 config, n_best=1, track_n_models=1, trg_ivocab=None,
                  **kwargs):
         super(BleuValidator, self).__init__(**kwargs)
         self.source_sentence = source_sentence
         self.samples = samples
         self.model = model
         self.data_stream = data_stream
-        self.state = state
+        self.config = config
         self.n_best = n_best
         self.track_n_models = track_n_models
-        self.verbose = state.get('val_set_out', None)
+        self.verbose = config.get('val_set_out', None)
 
         # Helpers
         self.vocab = data_stream.dataset.dictionary
@@ -141,18 +141,18 @@ class BleuValidator(SimpleExtension, SamplingBase):
         self.best_models = []
         self.val_bleu_curve = []
         self.beam_search = BeamSearch(source_sentence,
-                                      beam_size=self.state['beam_size'],
+                                      beam_size=self.config['beam_size'],
                                       samples=samples)
-        self.multibleu_cmd = ['perl', self.state['bleu_script'],
-                              self.state['val_set_grndtruth'], '<']
+        self.multibleu_cmd = ['perl', self.config['bleu_script'],
+                              self.config['val_set_grndtruth'], '<']
 
         # Create saving directory if it does not exist
-        if not os.path.exists(self.state['saveto']):
-            os.makedirs(self.state['saveto'])
+        if not os.path.exists(self.config['saveto']):
+            os.makedirs(self.config['saveto'])
 
-        if self.state['reload']:
+        if self.config['reload']:
             try:
-                bleu_score = numpy.load(os.path.join(self.state['saveto'],
+                bleu_score = numpy.load(os.path.join(self.config['saveto'],
                                         'val_bleu_scores.npz'))
                 self.val_bleu_curve = bleu_score['bleu_scores'].tolist()
 
@@ -169,7 +169,7 @@ class BleuValidator(SimpleExtension, SamplingBase):
 
         # Track validation burn in
         if self.main_loop.status['iterations_done'] <= \
-                self.state['val_burn_in']:
+                self.config['val_burn_in']:
             return
 
         # Get current model parameters
@@ -193,7 +193,7 @@ class BleuValidator(SimpleExtension, SamplingBase):
             self.trg_ivocab = {v: k for k, v in trg_vocab.items()}
 
         if self.verbose:
-            ftrans = open(self.state['val_set_out'], 'w')
+            ftrans = open(self.config['val_set_out'], 'w')
 
         for i, line in enumerate(self.data_stream.get_epoch_iterator()):
             """
@@ -201,7 +201,7 @@ class BleuValidator(SimpleExtension, SamplingBase):
             """
 
             seq = self._oov_to_unk(line[0])
-            input_ = numpy.tile(seq, (self.state['beam_size'], 1))
+            input_ = numpy.tile(seq, (self.config['beam_size'], 1))
 
             # draw sample, checking to ensure we don't get an empty string back
             trans, costs = \
@@ -264,7 +264,7 @@ class BleuValidator(SimpleExtension, SamplingBase):
 
     def _save_model(self, bleu_score):
         if self._is_valid_to_save(bleu_score):
-            model = ModelInfo(bleu_score, self.state['saveto'])
+            model = ModelInfo(bleu_score, self.config['saveto'])
 
             # Manage n-best model list first
             if len(self.best_models) >= self.track_n_models:
@@ -281,7 +281,7 @@ class BleuValidator(SimpleExtension, SamplingBase):
             s = signal.signal(signal.SIGINT, signal.SIG_IGN)
             logger.info("Saving new model {}".format(model.path))
             numpy.savez(model.path, **self.main_loop.model.get_param_values())
-            numpy.savez(os.path.join(self.state['saveto'],'val_bleu_scores.npz'),
+            numpy.savez(os.path.join(self.config['saveto'],'val_bleu_scores.npz'),
                         bleu_scores=self.val_bleu_curve)
             signal.signal(signal.SIGINT, s)
 

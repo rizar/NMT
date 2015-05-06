@@ -37,7 +37,7 @@ from blocks.bricks.sequence_generators import (
 )
 from blocks.select import Selector
 
-import states
+import config
 import stream
 import stream_fi_en
 
@@ -47,13 +47,13 @@ logger = logging.getLogger(__name__)
 
 # Get the arguments
 parser = argparse.ArgumentParser()
-parser.add_argument("--proto",  default="get_states_wmt15_fi_en_40k",
-                    help="Prototype state to use for state")
+parser.add_argument("--proto",  default="get_config_wmt15_fi_en_40k",
+                    help="Prototype config to use for config")
 args = parser.parse_args()
 
-# Make state global, nasty workaround since parameterizing stream
+# Make config global, nasty workaround since parameterizing stream
 # will cause erroneous picklable behaviour, find a better solution
-state = getattr(states, args.proto)()
+config = getattr(config, args.proto)()
 
 
 # dictionary mapping stream name to stream getters
@@ -100,9 +100,9 @@ class MainLoopDumpManagerWMT15(MainLoopDumpManager):
 class LoadFromDumpWMT15(LoadFromDump):
     """Wrapper to use MainLoopDumpManagerWMT15"""
 
-    def __init__(self, state_path, **kwargs):
-        super(LoadFromDumpWMT15, self).__init__(state_path, **kwargs)
-        self.manager = MainLoopDumpManagerWMT15(state_path)
+    def __init__(self, config_path, **kwargs):
+        super(LoadFromDumpWMT15, self).__init__(config_path, **kwargs)
+        self.manager = MainLoopDumpManagerWMT15(config_path)
 
 
 class LookupFeedbackWMT15(LookupFeedback):
@@ -273,7 +273,7 @@ class Decoder(Initializable):
             glimpses=self.attention.take_glimpses.outputs[0])
 
 
-def main(state, tr_stream, dev_stream):
+def main(config, tr_stream, dev_stream):
 
     # Create Theano variables
     source_sentence = tensor.lmatrix('source')
@@ -283,17 +283,17 @@ def main(state, tr_stream, dev_stream):
     sampling_input = tensor.lmatrix('input')
 
     # Construct model
-    encoder = BidirectionalEncoder(state['src_vocab_size'], state['enc_embed'],
-                                   state['enc_nhids'])
-    decoder = Decoder(state['trg_vocab_size'], state['dec_embed'],
-                      state['dec_nhids'], state['enc_nhids'] * 2)
+    encoder = BidirectionalEncoder(config['src_vocab_size'], config['enc_embed'],
+                                   config['enc_nhids'])
+    decoder = Decoder(config['trg_vocab_size'], config['dec_embed'],
+                      config['dec_nhids'], config['enc_nhids'] * 2)
     cost = decoder.cost(encoder.apply(source_sentence, source_sentence_mask),
                         source_sentence_mask, target_sentence, target_sentence_mask)
 
     cg = ComputationGraph(cost)
 
     # Initialize model
-    encoder.weights_init = decoder.weights_init = IsotropicGaussian(state['weight_scale'])
+    encoder.weights_init = decoder.weights_init = IsotropicGaussian(config['weight_scale'])
     encoder.biases_init = decoder.biases_init = Constant(0)
     encoder.push_initialization_config()
     decoder.push_initialization_config()
@@ -305,21 +305,21 @@ def main(state, tr_stream, dev_stream):
     cg = ComputationGraph(cost)
 
     # apply dropout for regularization
-    if state['dropout'] < 1.0:
+    if config['dropout'] < 1.0:
         # dropout is applied to the output of maxout in ghog
         dropout_inputs = [x for x in cg.intermediary_variables
                           if x.name == 'maxout_apply_output']
-        cg = apply_dropout(cg, dropout_inputs, state['dropout'])
+        cg = apply_dropout(cg, dropout_inputs, config['dropout'])
 
     # Apply weight noise for regularization
-    if state['weight_noise_ff'] > 0.0:
+    if config['weight_noise_ff'] > 0.0:
         enc_params = Selector(encoder.lookup).get_params().values()
         enc_params += Selector(encoder.fwd_fork).get_params().values()
         enc_params += Selector(encoder.back_fork).get_params().values()
         dec_params = Selector(decoder.sequence_generator.readout).get_params().values()
         dec_params += Selector(decoder.sequence_generator.fork).get_params().values()
         dec_params += Selector(decoder.state_init).get_params().values()
-        cg = apply_noise(cg, enc_params+dec_params, state['weight_noise_ff'])
+        cg = apply_noise(cg, enc_params+dec_params, config['weight_noise_ff'])
 
     # Print shapes
     shapes = [param.get_value().shape for param in cg.parameters]
@@ -339,8 +339,8 @@ def main(state, tr_stream, dev_stream):
     # Set up training algorithm
     algorithm = GradientDescent(
         cost=cost, params=cg.parameters,
-        step_rule=CompositeRule([StepClipping(state['step_clipping']),
-                                 eval(state['step_rule'])()])
+        step_rule=CompositeRule([StepClipping(config['step_clipping']),
+                                 eval(config['step_rule'])()])
     )
 
     # Set up beam search and sampling computation graphs
@@ -357,21 +357,21 @@ def main(state, tr_stream, dev_stream):
 
     # Set extensions
     extensions = [
-        Sampler(model=search_model, state=state, data_stream=tr_stream,
-                every_n_batches=state['sampling_freq']),
-        BleuValidator(sampling_input, samples=samples, state=state,
+        Sampler(model=search_model, config=config, data_stream=tr_stream,
+                every_n_batches=config['sampling_freq']),
+        BleuValidator(sampling_input, samples=samples, config=config,
                       model=search_model, data_stream=dev_stream,
-                      every_n_batches=state['bleu_val_freq']),
+                      every_n_batches=config['bleu_val_freq']),
         TrainingDataMonitoring([cost], after_batch=True),
         #Plot('En-Fr', channels=[['decoder_cost_cost']],
         #     after_batch=True),
         Printing(after_batch=True),
-        Dump(state['saveto'], every_n_batches=state['save_freq'])
+        Dump(config['saveto'], every_n_batches=config['save_freq'])
     ]
 
     # Reload model if necessary
-    if state['reload']:
-        extensions += [LoadFromDumpWMT15(state['saveto'])]
+    if config['reload']:
+        extensions += [LoadFromDumpWMT15(config['saveto'])]
 
     # Initialize main loop
     main_loop = MainLoop(
@@ -386,8 +386,8 @@ def main(state, tr_stream, dev_stream):
 
 
 if __name__ == "__main__":
-    logger.info("Model options:\n{}".format(pprint.pformat(state)))
-    tr_stream, dev_stream = [streams[state['stream']].masked_stream,
-                             streams[state['stream']].dev_stream]
-    main(state, tr_stream, dev_stream)
+    logger.info("Model options:\n{}".format(pprint.pformat(config)))
+    tr_stream, dev_stream = [streams[config['stream']].masked_stream,
+                             streams[config['stream']].dev_stream]
+    main(config, tr_stream, dev_stream)
 
