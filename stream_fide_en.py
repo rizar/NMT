@@ -18,11 +18,11 @@ from fuel.streams import DataStream
 from fuel.transformers import (
     Transformer, Merge, Batch, Filter, Padding, SortMapping, Unpack, Mapping)
 
-# Everthing here should be wrapped and parameterized by state
+# Everthing here should be wrapped and parameterized by config
 # this import is to workaround for pickling errors when wrapped
-from model_multi_enc import state
+from model_multi_enc import config
 
-num_encs = state['num_encs']
+num_encs = config['num_encs']
 
 
 class PrintMultiStream(SimpleExtension):
@@ -46,7 +46,7 @@ class MultiEncStream(Transformer, six.Iterator):
         self.streams = streams
         self.schedule = numpy.asarray(schedule)
         self.counters = numpy.zeros_like(self.schedule)
-        self.curr_id = 0  # this is the state of transformer
+        self.curr_id = 0  # this is the config of transformer
         self.curr_epoch_iterator = None
         self.num_encs = len(streams)
         self.training_counter = numpy.zeros_like(self.counters)
@@ -72,12 +72,11 @@ class MultiEncStream(Transformer, six.Iterator):
 
     def _add_selectors(self, batch):
         """Set src and target selector vectors"""
-        bs = self.batch_sizes[self.curr_id]
         batch['src_selector'] = numpy.zeros(
-            (bs, self.num_encs)).astype(theano.config.floatX)
-        batch['src_selector'][:, self.curr_id] = 1.
+            (self.num_encs,)).astype(theano.config.floatX)
+        batch['src_selector'][self.curr_id] = 1.
         batch['trg_selector'] = numpy.tile(
-            1., (bs, 1)).astype(theano.config.floatX)
+            1., (1,)).astype(theano.config.floatX)
 
     def _add_missing_sources(self, batch):
 
@@ -130,12 +129,12 @@ def _oov_to_unk_multi(sentence_pair, src_vocab_sizes=None,
 # *****************************************************************************
 
 # Prepare source vocabs and files, there are 2 vocabs and 2 data files
-src_vocabs = [state['src_vocab_%d' % x] for x in xrange(num_encs)]
-src_files = [state['src_data_%d' % x] for x in xrange(num_encs)]
+src_vocabs = [config['src_vocab_%d' % x] for x in xrange(num_encs)]
+src_files = [config['src_data_%d' % x] for x in xrange(num_encs)]
 
 # Prepare target vocabs and files, there are  2 vocabs and 3 data files
-trg_vocab = state['trg_vocab']
-trg_files = [state['trg_data_%d' % x] for x in xrange(num_encs)]
+trg_vocab = config['trg_vocab']
+trg_files = [config['trg_data_%d' % x] for x in xrange(num_encs)]
 
 # Create individual source streams
 src_datasets = [TextFile([ff], cPickle.load(open(vv)), None)
@@ -152,22 +151,22 @@ for i in xrange(num_encs):
                     trg_datasets[i].get_example_stream()],
                    ('source_%d' % i, 'target'))
     stream = Filter(stream, predicate=_too_long,
-                    predicate_args={'seq_len':state['seq_len']})
+                    predicate_args={'seq_len':config['seq_len']})
     stream = Mapping(stream, _oov_to_unk,
-                     src_vocab_size=state['src_vocab_size_%d' % i],
-                     trg_vocab_size=state['trg_vocab_size'],
-                     unk_id=state['unk_id'])
+                     src_vocab_size=config['src_vocab_size_%d' % i],
+                     trg_vocab_size=config['trg_vocab_size'],
+                     unk_id=config['unk_id'])
     stream = Batch(stream,
                    iteration_scheme=ConstantScheme(
-                       state['batch_size_enc_%d' % i]*state['sort_k_batches']))
+                       config['batch_size_enc_%d' % i]*config['sort_k_batches']))
 
     stream = Mapping(stream, SortMapping(_length))
     stream = Unpack(stream)
     stream = Batch(stream, iteration_scheme=ConstantScheme(
-        state['batch_size_enc_%d' % i]))
+        config['batch_size_enc_%d' % i]))
     masked_stream = Padding(stream)
     ind_streams.append(masked_stream)
 
-multi_enc_stream = MultiEncStream(ind_streams, schedule=state['schedule'],
-                                  batch_sizes=[state['batch_size_enc_%d' % i]
+multi_enc_stream = MultiEncStream(ind_streams, schedule=config['schedule'],
+                                  batch_sizes=[config['batch_size_enc_%d' % i]
                                               for i in xrange(num_encs)]  )
