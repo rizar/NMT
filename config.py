@@ -134,11 +134,14 @@ def get_config_wmt15_fide_en_TEST():
     config['seq_len'] = 50
     config['enc_nhids_0'] = 100
     config['enc_nhids_1'] = 150
-    config['dec_nhids'] = 100
+    config['dec_nhids'] = 120
     config['enc_embed_0'] = 56
     config['enc_embed_1'] = 62
     config['dec_embed'] = 62
-    config['state_dim'] = 200
+    config['src_rep_dim'] = 180  # Annotation dim for src_selector
+    config['trg_rep_dim'] = 130  # Annotation dim for trg_selector
+    config['representation_dim'] = 200  # this is the joint annotation
+                                        # dimension of encoders
     config['saveto'] = 'multiEnc_TEST'
 
     # Optimization related

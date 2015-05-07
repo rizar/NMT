@@ -2,6 +2,7 @@
 # Works with https://github.com/orhanf/blocks/tree/wmt15
 # 0e23b0193f64dc3e56da18605d53d6f5b1352848
 import argparse
+import numpy
 import logging
 import pprint
 import theano
@@ -21,19 +22,20 @@ from blocks.extensions.monitoring import TrainingDataMonitoring
 from blocks.extensions.saveload import Dump
 
 from blocks.bricks import (Tanh, Maxout, Linear, FeedforwardSequence,
-                           Bias, Initializable, MLP)
+                           Bias, Initializable, MLP, Sigmoid)
 from blocks.bricks.attention import (ShallowEnergyComputer,
                                      AbstractAttentionRecurrent,
                                      GenericSequenceAttention)
 from blocks.bricks.base import application, lazy
 from blocks.bricks.lookup import LookupTable
 from blocks.bricks.parallel import Fork, Parallel, Distribute
-from blocks.bricks.recurrent import GatedRecurrent, Bidirectional, recurrent
+from blocks.bricks.recurrent import (GatedRecurrent, Bidirectional, recurrent,
+                                     BaseRecurrent)
 from blocks.bricks.sequence_generators import (
     LookupFeedback, Readout, SoftmaxEmitter,
     BaseSequenceGenerator
 )
-from blocks.utils import dict_union, dict_subset
+from blocks.utils import dict_union, dict_subset, shared_floatx_nans
 
 import config
 import stream_fide_en
@@ -75,16 +77,16 @@ class MultiEncoder(Initializable):
 
         # this is the embedding from h to z
         self.annotation_embedders = [Linear(input_dim=(2 * config['enc_nhids_%d' % i]),
-                                            output_dim=config['state_dim'],
+                                            output_dim=config['representation_dim'],
                                             name='annotation_embedder_%d' % i,
                                             use_bias=False)
                                      for i in xrange(self.num_encs)]
         self.src_selector_embedder = Linear(input_dim=config['num_encs'],
-                                            output_dim=config['state_dim'],
+                                            output_dim=config['src_rep_dim'],
                                             use_bias=False,
                                             name='src_selector_embedder')
         self.trg_selector_embedder = Linear(input_dim=config['num_decs'],
-                                            output_dim=config['state_dim'],
+                                            output_dim=config['trg_rep_dim'],
                                             use_bias=False,
                                             name='trg_selector_embedder')
         self.children = self.encoders + self.annotation_embedders +\
@@ -112,14 +114,14 @@ class MultiEncoder(Initializable):
         src_selector_rep = self.src_selector_embedder.apply(
                 #theano.tensor.repeat(
                 theano.tensor.repeat(
-                    src_selector[None, :], rep.shape[1], axis=0)[None, :, :]
+                    src_selector[None, :], rep.shape[1], axis=0)  #[None, :, :]
                 #,rep.shape[0], axis=0)
         )
         # Target selector annotations, expand it similarly
         trg_selector_rep = self.trg_selector_embedder.apply(
                 #theano.tensor.repeat(
                 theano.tensor.repeat(
-                    trg_selector[None, :], rep.shape[1], axis=0)[None, :, :]
+                    trg_selector[None, :], rep.shape[1], axis=0)  #[None, :, :]
                 #,rep.shape[0], axis=0)
         )
         return rep, mask, src_selector_rep, trg_selector_rep
@@ -201,18 +203,108 @@ class BidirectionalEncoder(Initializable):
         return representation
 
 
-class GRUInitialState(GatedRecurrent):
-    def __init__(self, attended_dim, **kwargs):
-        super(GRUInitialState, self).__init__(**kwargs)
+class GRUwithContext(BaseRecurrent, Initializable):
+    def __init__(self, attended_dim, dim, context_dim, activation=None, gate_activation=None,
+                 use_update_gate=True, use_reset_gate=True,**kwargs):
+        super(GRUwithContext, self).__init__(**kwargs)
+        self.dim = dim
+        self.use_update_gate = use_update_gate
+        self.use_reset_gate = use_reset_gate
+
+        if not activation:
+            activation = Tanh()
+        if not gate_activation:
+            gate_activation = Sigmoid()
+        self.activation = activation
+        self.gate_activation = gate_activation
+
+        self.children = [activation, gate_activation]
+
         self.attended_dim = attended_dim
+        self.context_dim = context_dim
         self.initial_transformer = MLP(activations=[Tanh()],
                                        dims=[attended_dim, self.dim],
                                        name='state_initializer')
         self.children.append(self.initial_transformer)
+        self.src_selector_embedder = Linear(input_dim=context_dim,
+                                            output_dim=self.dim,
+                                            use_bias=False,
+                                            name='src_selector_embedder')
+        self.children.append(self.src_selector_embedder)
+
+    @property
+    def state_to_state(self):
+        return self.params[0]
+
+    @property
+    def state_to_update(self):
+        return self.params[1]
+
+    @property
+    def state_to_reset(self):
+        return self.params[2]
+
+    def get_dim(self, name):
+        if name == 'mask':
+            return 0
+        if name in self.apply.sequences + self.apply.states:
+            return self.dim
+        if name in self.apply.contexts:
+            return self.context_dim
+        return super(GRUwithContext, self).get_dim(name)
+
+    def _allocate(self):
+        def new_param(name):
+            return shared_floatx_nans((self.dim, self.dim), name=name)
+
+        self.params.append(new_param('state_to_state'))
+        self.params.append(new_param('state_to_update')
+                           if self.use_update_gate else None)
+        self.params.append(new_param('state_to_reset')
+                           if self.use_reset_gate else None)
+
+    def _initialize(self):
+        self.weights_init.initialize(self.state_to_state, self.rng)
+        if self.use_update_gate:
+            self.weights_init.initialize(self.state_to_update, self.rng)
+        if self.use_reset_gate:
+            self.weights_init.initialize(self.state_to_reset, self.rng)
+
+    @recurrent(states=['states'], outputs=['states'], contexts=['attended_1'])
+    def apply(self, inputs, update_inputs=None, reset_inputs=None,
+              states=None, mask=None, attended_1=None):
+        if (self.use_update_gate != (update_inputs is not None)) or \
+                (self.use_reset_gate != (reset_inputs is not None)):
+            raise ValueError("Configuration and input mismatch: You should "
+                             "provide inputs for gates if and only if the "
+                             "gates are on.")
+
+        states_reset = states
+
+        if self.use_reset_gate:
+            reset_values = self.gate_activation.apply(
+                states.dot(self.state_to_reset) + reset_inputs)
+            states_reset = states * reset_values
+
+        src_embed = self.src_selector_embedder.apply(attended_1)
+        next_states = self.activation.apply(
+            states_reset.dot(self.state_to_state) + inputs + src_embed)
+
+        if self.use_update_gate:
+            update_values = self.gate_activation.apply(
+                states.dot(self.state_to_update) + update_inputs)
+            next_states = (next_states * update_values +
+                           states * (1 - update_values))
+
+        if mask:
+            next_states = (mask[:, None] * next_states +
+                           (1 - mask[:, None]) * states)
+
+        return next_states
 
     @application
     def initial_state(self, state_name, batch_size, *args, **kwargs):
-        attended = kwargs['attended']
+        attended = kwargs['attended_0']
         if state_name == 'states':
             initial_state = self.initial_transformer.apply(
                 attended[0, :, -self.attended_dim:])
@@ -221,6 +313,19 @@ class GRUInitialState(GatedRecurrent):
         if dim == 0:
             return tensor.zeros((batch_size,))
         return tensor.zeros((batch_size, dim))
+
+    @apply.property('sequences')
+    def apply_inputs(self):
+        sequences = ['mask', 'inputs']
+        if self.use_update_gate:
+            sequences.append('update_inputs')
+        if self.use_reset_gate:
+            sequences.append('reset_inputs')
+        return sequences
+
+    @apply.property('contexts')
+    def apply_contexts(self):
+        return ['attended_1']
 
 
 class SequenceMultiContentAttention(GenericSequenceAttention, Initializable):
@@ -302,6 +407,7 @@ class SequenceMultiContentAttention(GenericSequenceAttention, Initializable):
             return tensor.zeros((batch_size, self.attended_dims[0]))
         elif name == "weights":
             return tensor.zeros((batch_size, attended[0].shape[0]))
+            #return tensor.zeros((attended[0].shape[0], batch_size))
         raise ValueError("Unknown glimpse name {}".format(name))
 
     @application(inputs=['attended'],
@@ -326,7 +432,6 @@ class SequenceMultiContentAttention(GenericSequenceAttention, Initializable):
         if name in ['preprocessed_attended_%d' % i
                     for i in xrange(self.num_attended)]:
             return self.match_dim
-        import ipdb;ipdb.set_trace()
         return super(SequenceMultiContentAttention, self).get_dim(name)
 
 
@@ -342,7 +447,11 @@ class AttentionRecurrentWithMultiContext(AbstractAttentionRecurrent, Initializab
         self.num_contexts = num_contexts
         attended_names = ['attended_%d' % i for i in xrange(num_contexts)]
         attended_mask_name = 'attended_mask'
+
+        # Construct contexts names and Remove duplicates
         self._context_names += attended_names + [attended_mask_name]
+        self._context_names = list(set(self._context_names))
+
         normal_inputs = [name for name in self._sequence_names
                          if 'mask' not in name]
         distribute = Distribute(normal_inputs,
@@ -380,6 +489,7 @@ class AttentionRecurrentWithMultiContext(AbstractAttentionRecurrent, Initializab
 
     @application
     def take_glimpses(self, **kwargs):
+        """Wrapper for attention.take_glimpses"""
         states = dict_subset(kwargs, self._state_names, pop=True)
         glimpses = dict_subset(kwargs, self._glimpse_names, pop=True)
         glimpses_needed = dict_subset(glimpses, self.previous_glimpses_needed)
@@ -399,12 +509,14 @@ class AttentionRecurrentWithMultiContext(AbstractAttentionRecurrent, Initializab
 
     @application
     def compute_states(self, **kwargs):
-        # TODO: check this
-        import ipdb;ipdb.set_trace()
         # Masks are not mandatory, that's why 'must_have=False'
         sequences = dict_subset(kwargs, self._sequence_names,
                                 pop=True, must_have=False)
         glimpses = dict_subset(kwargs, self._glimpse_names, pop=True)
+
+        # This is the additional context to GRU from source selector
+        contexts = dict_subset(kwargs, self.transition.apply.contexts, pop=False)
+
         for name in self.attended_names:
             kwargs.pop(name)
         kwargs.pop(self.attended_mask_name)
@@ -412,10 +524,10 @@ class AttentionRecurrentWithMultiContext(AbstractAttentionRecurrent, Initializab
         sequences.update(self.distribute.apply(
             as_dict=True, **dict_subset(dict_union(sequences, glimpses),
                                         self.distribute.apply.inputs)))
-        # TODO: gru state conditioning for source selector should be done here
+
         current_states = self.transition.apply(
             iterate=False, as_list=True,
-            **dict_union(sequences, kwargs))
+            **dict_union(sequences, contexts, kwargs))
         return current_states
 
     @compute_states.property('outputs')
@@ -445,6 +557,7 @@ class AttentionRecurrentWithMultiContext(AbstractAttentionRecurrent, Initializab
                 states, glimpses, attendeds_dict,
                 preprocessed_attendeds_dict,
                 {self.attended_mask_name: attended_mask}))
+
         current_states = self.compute_states(
             as_list=True,
             **dict_union(sequences, states, current_glimpses, kwargs))
@@ -484,6 +597,14 @@ class AttentionRecurrentWithMultiContext(AbstractAttentionRecurrent, Initializab
     def apply_contexts(self):
         return self._context_names
 
+    @application
+    def initial_state(self, state_name, batch_size, **kwargs):
+        if state_name in self._glimpse_names:
+            return self.attention.initial_glimpses(
+                state_name, batch_size, [kwargs[name] for name in
+                                         self.attended_names])
+        return self.transition.initial_state(state_name, batch_size, **kwargs)
+
     def get_dim(self, name):
         if name in self._glimpse_names:
             return self.attention.get_dim(name)
@@ -513,19 +634,10 @@ class SequenceGeneratorWithMultiContext(BaseSequenceGenerator):
             readout, transition, **kwargs)
 
 
-class ReadoutWithMultiEncoder(Readout):
-
-    def get_dim(self, name):
-        # TODO: if we change the name to 'attended_1' then we wont need this class
-        if name == 'src_selector_rep':
-            return self.merged_dim
-        return super(ReadoutWithMultiEncoder, self).get_dim(name)
-
-
 class Decoder(Initializable):
     def __init__(self, vocab_size, embedding_dim, state_dim,
                  representation_dim, src_selector_rep, trg_selector_rep,
-                 num_encs, **kwargs):
+                 src_rep_dim, trg_rep_dim, num_encs, **kwargs):
         super(Decoder, self).__init__(**kwargs)
         self.vocab_size = vocab_size
         self.embedding_dim = embedding_dim
@@ -533,22 +645,24 @@ class Decoder(Initializable):
         self.representation_dim = representation_dim
         self.src_selector_rep = src_selector_rep
         self.trg_selector_rep = trg_selector_rep
+        self.src_rep_dim = src_rep_dim
+        self.trg_rep_dim = trg_rep_dim
         self.num_encs = num_encs
 
         # Recurrent net
-        self.transition = GRUInitialState(
-            attended_dim=state_dim, dim=state_dim,
+        self.transition = GRUwithContext(
+            attended_dim=state_dim, dim=state_dim, context_dim=src_rep_dim,
             activation=Tanh(), name='decoder')
 
         # Attention module
         self.attention = SequenceMultiContentAttention(
             state_names=self.transition.apply.states,
-            attended_dims=[representation_dim, state_dim, state_dim],
+            attended_dims=[representation_dim, src_rep_dim, trg_rep_dim],
             match_dim=state_dim, name="attention")
 
         # Readout module
-        readout = ReadoutWithMultiEncoder(
-            source_names=['states', 'feedback', 'src_selector_rep',
+        readout = Readout(
+            source_names=['states', 'feedback', 'attended_1',
                           self.attention.take_glimpses.outputs[0]],
             readout_dim=self.vocab_size,
             emitter=SoftmaxEmitter(initial_output=-1),
@@ -616,11 +730,32 @@ def main(config, tr_stream, dev_stream):
     target_sentence = tensor.lmatrix('target')
     target_sentence_mask = tensor.matrix('target_mask')
 
+    '''
+    theano.config.compute_test_value = 'warn'
+    src_selector.tag.test_value = numpy.asarray([1, 0]).astype('float32')
+    trg_selector.tag.test_value = numpy.asarray([1,]).astype('float32')
+    source_sentences[0].tag.test_value = numpy.random.randint(10, size=(10, 12))
+    source_sentences[1].tag.test_value = numpy.random.randint(10, size=(10, 22))
+    source_masks[0].tag.test_value = \
+        numpy.random.rand(10, 12).astype('float32')
+    source_masks[0].tag.test_value = \
+        numpy.zeros((10, 12)).astype('float32')
+    target_sentence.tag.test_value = numpy.random.randint(10, size=(10, 14))
+    target_sentence_mask.tag.test_value = \
+        numpy.random.rand(10, 14).astype('float32')
+    '''
+
     # Construct model
     multi_encoder = MultiEncoder(config)
-    decoder = Decoder(config['trg_vocab_size'], config['dec_embed'],
-                      config['dec_nhids'], config['state_dim'],
-                      src_selector, trg_selector, config['num_encs'])
+    decoder = Decoder(vocab_size=config['trg_vocab_size'],
+                      embedding_dim=config['dec_embed'],
+                      state_dim=config['dec_nhids'],
+                      representation_dim=config['representation_dim'],
+                      src_selector_rep=src_selector,
+                      trg_selector_rep=trg_selector,
+                      src_rep_dim=config['src_rep_dim'],
+                      trg_rep_dim=config['trg_rep_dim'],
+                      num_encs=config['num_encs'])
     representation, src_mask, src_selector_rep, trg_selector_rep =\
         multi_encoder.apply(source_sentences, source_masks,
                             src_selector, trg_selector)
@@ -645,15 +780,23 @@ def main(config, tr_stream, dev_stream):
     cg = ComputationGraph(cost)
 
     # This block evaluates the encoder annotations
-    import numpy
-    f = theano.function(source_sentences + source_masks + [src_selector],
-                        representation)
+    f = theano.function(inputs=source_sentences + source_masks +\
+                               [src_selector, trg_selector],
+                        outputs=[representation, src_mask, src_selector_rep,
+                                trg_selector_rep])
     s1 = numpy.random.randint(10, size=(10, 20))
     s2 = numpy.random.randint(10, size=(10, 30))
     m1 = numpy.random.rand(10, 20).astype('float32')
     m2 = numpy.random.rand(10, 30).astype('float32')
-    rep_ = f(s1, s2, m1, m2, [1, 0])  # this should be of size (20,10,200)
-    rep_ = f(s1, s2, m1, m2, [0, 1])  # this should be of size (30,10,200)
+    rep_ = f(s1, s2, m1, m2, [1, 0],[1,])[0]  # this should be of size (20,10,200)
+    rep_ = f(s1, s2, m1, m2, [0, 1],[1,])[0]  # this should be of size (30,10,200)
+
+    rep_, s_mask, s_rep, t_rep = f(s1, s2, m1, m2, [1, 0], [1,])  # this should be of size (20,10,200)
+
+
+    # This block checks the decoder output
+    g = theano.function
+
 
     # Set up training algorithm
     algorithm = GradientDescent(
