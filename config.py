@@ -11,7 +11,7 @@ class ReadOnlyDict(dict):
         raise(TypeError, "update is not supported")
 
 
-def get_configs_wmt15_fi_en_40k():
+def get_config_wmt15_fi_en_40k():
     config = {}
 
     # Model related
@@ -68,7 +68,7 @@ def get_configs_wmt15_fi_en_40k():
     return config
 
 
-def get_configs_wmt15_fi_en_TEST():
+def get_config_wmt15_fi_en_TEST():
     config = {}
 
     # Model related
