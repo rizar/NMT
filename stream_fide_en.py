@@ -116,7 +116,11 @@ def _oov_to_unk(sentence_pair, src_vocab_size=30000,
             [x if x < trg_vocab_size else unk_id for x in sentence_pair[1]])
 
 
-def _too_long(sentence_pair, seq_len=50):
+def _too_long(sentence_pair, params):
+    # TODO: harmonize argumenrs with oov_to_unk
+    seq_len = 50
+    if 'seq_len' in params:
+        seq_len = params['seq_len']
     return all([len(sentence) < seq_len
                 for sentence in sentence_pair])
 

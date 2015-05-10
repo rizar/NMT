@@ -19,6 +19,7 @@ from blocks.graph import ComputationGraph
 from blocks.initialization import IsotropicGaussian, Orthogonal, Constant
 from blocks.extensions import Printing
 from blocks.extensions.monitoring import TrainingDataMonitoring
+from blocks.extensions.plot import Plot
 from blocks.extensions.saveload import Dump
 
 from blocks.bricks import (Tanh, Maxout, Linear, FeedforwardSequence,
@@ -813,6 +814,8 @@ def main(config, tr_stream, dev_stream):
         TrainingDataMonitoring([cost], after_batch=True),
         Printing(after_batch=True),
         stream_fide_en.PrintMultiStream(after_batch=True),
+        Plot('FiDe-En', channels=[['decoder_cost_cost']],
+             after_batch=True),
         Dump(config['saveto'], every_n_batches=config['save_freq'])
     ]
 
