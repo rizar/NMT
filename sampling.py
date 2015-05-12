@@ -14,14 +14,6 @@ from subprocess import Popen, PIPE
 logger = logging.getLogger(__name__)
 
 
-class MultiSampler(SimpleExtension):
-
-    def __init__(self, model, data_stream, config, ):
-        self.model = model
-        self.data_stream = data_stream
-        self.num_encs = config['num_encs']
-
-
 class SamplingBase(object):
 
     def _get_attr_rec(self, obj, attr):
@@ -51,6 +43,95 @@ class SamplingBase(object):
 
     def _idx_to_word(self, seq, ivocab):
         return " ".join([ivocab.get(idx, "<UNK>") for idx in seq])
+
+
+class MultiEncSampler(SimpleExtension, SamplingBase):
+
+    def __init__(self, model, data_stream, config, **kwargs):
+        super(MultiEncSampler, self).__init__(**kwargs)
+        self.model = model
+        self.data_stream = data_stream
+        self.config = config
+        self.num_encs = config['num_encs']
+        self.is_synced = False
+        self.sampling_fn = model.get_theano_function()
+
+    def do(self, which_callback, *args):
+
+        # Get vocabularies and current model parameters
+        if not self.is_synced:
+            self.src_vocabs, self.trg_vocabs,\
+                self.src_ivocabs, self.trg_ivocabs = self.get_vocabs()
+
+            self.model.params = self.main_loop.model.params
+            self.is_synced = True
+
+        # Get data, NOTE these are not peeked batches
+        batches = self.data_stream.get_batches_from_all_streams()
+        streams = self.main_loop.data_stream.streams
+        source_names = [streams[i].mask_sources[0]
+                        for i in xrange(self.num_encs)]
+
+        print ""
+        for ss in xrange(len(batches)):
+
+            batch = batches[ss]
+            sample_idx = numpy.random.choice(
+                    self.config['batch_size_enc_%d' % ss],
+                    self.config['hook_samples'], replace=False)
+
+            src_inputs = [batch[source_names[ii]][sample_idx, :]
+                          for ii in xrange(self.num_encs)]
+            trg_input = batch[streams[ss].mask_sources[1]][sample_idx, :]
+
+            src_selector = batch['src_selector']
+            trg_selector = batch['trg_selector']
+
+            inputs = src_inputs + [src_selector, trg_selector]
+
+            # Sample
+            _1, outputs, _2, _3, costs = (self.sampling_fn(*inputs))
+            outputs = outputs.T
+            costs = list(costs.T)
+
+            for i in range(len(outputs)):
+                input_length = self._get_true_length(
+                        src_inputs[ss][i], self.src_vocabs[ss])
+                target_length = self._get_true_length(
+                        trg_input[i], self.trg_vocabs[0])
+                sample_length = self._get_true_length(
+                        outputs[i], self.trg_vocabs[0])
+
+                print "Input %d: " % ss,\
+                      self._idx_to_word(
+                          src_inputs[ss][i][:input_length],
+                          self.src_ivocabs[ss])
+                print "Target: ",\
+                      self._idx_to_word(
+                          trg_input[i][:target_length], self.trg_ivocabs[0])
+                print "Sample %d: " % ss,\
+                      self._idx_to_word(
+                          outputs[i][:sample_length], self.trg_ivocabs[0])
+                print "Sample cost: ", costs[i][:sample_length].sum()
+                print ""
+
+    def get_vocabs(self):
+        src_vocabs, trg_vocabs, src_ivocabs, trg_ivocabs =\
+                [[] for _ in xrange(4)]
+
+        for ii in xrange(self.num_encs):
+            sources = self._get_attr_rec(
+                    self.data_stream.streams[ii], 'data_stream')
+            src_vocab = sources.data_streams[0].dataset.dictionary
+            trg_vocab = sources.data_streams[1].dataset.dictionary
+            src_ivocab = {v: k for k, v in src_vocab.items()}
+            trg_ivocab = {v: k for k, v in trg_vocab.items()}
+            src_vocabs.append(src_vocab)
+            trg_vocabs.append(trg_vocab)
+            src_ivocabs.append(src_ivocab)
+            trg_ivocabs.append(trg_ivocab)
+
+        return src_vocabs, trg_vocabs, src_ivocabs, trg_ivocabs
 
 
 class Sampler(SimpleExtension, SamplingBase):

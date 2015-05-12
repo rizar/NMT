@@ -43,6 +43,8 @@ from blocks.utils import dict_union, dict_subset, shared_floatx_nans
 import config
 import stream_fide_en
 
+from sampling import MultiEncSampler
+
 logger = logging.getLogger(__name__)
 
 # Get the arguments
@@ -373,7 +375,7 @@ class SequenceMultiContentAttention(GenericSequenceAttention, Initializable):
     @application
     def compute_energies(self, attendeds, preprocessed_attendeds,
                          states):
-        if not preprocessed_attendeds:
+        if not all(preprocessed_attendeds):
             preprocessed_attendeds = self.preprocess(attendeds)
         transformed_states = self.state_transformers.apply(as_dict=True,
                                                            **states)
@@ -714,12 +716,31 @@ class Decoder(Initializable):
         return (cost * target_sentence_mask).sum() / target_sentence_mask.shape[1]
 
     @application
-    def generate(self, source_sentence, representation):
+    def generate(self, source_sentences, representation,
+                 src_selector, trg_selector,
+                 src_selector_rep, trg_selector_rep):
+        n_steps = ifelse(
+                theano.tensor.eq(src_selector[0], 1.),
+                source_sentences[0].shape[1],
+                source_sentences[1].shape[1])
+
+        batch_size = ifelse(
+                theano.tensor.eq(src_selector[0], 1.),
+                source_sentences[0].shape[0],
+                source_sentences[1].shape[0])
+
+        attended_mask = ifelse(
+                theano.tensor.eq(src_selector[0], 1.),
+                tensor.ones(source_sentences[0].shape).T,
+                tensor.ones(source_sentences[1].shape).T)
+
         return self.sequence_generator.generate(
-            n_steps=2 * source_sentence.shape[1],
-            batch_size=source_sentence.shape[0],
-            attended=representation,
-            attended_mask=tensor.ones(source_sentence.shape).T,
+            n_steps=2 * n_steps,
+            batch_size=batch_size,
+            attended_0=representation,
+            attended_1=src_selector_rep,
+            attended_2=trg_selector_rep,
+            attended_mask=attended_mask,
             glimpses=self.attention.take_glimpses.outputs[0])
 
 
@@ -732,6 +753,11 @@ def main(config, tr_stream, dev_stream):
     source_masks = [tensor.matrix('source_0_mask'), tensor.matrix('source_1_mask')]
     target_sentence = tensor.lmatrix('target')
     target_sentence_mask = tensor.matrix('target_mask')
+    sampling_inputs = [tensor.lmatrix('input_0'), tensor.lmatrix('input_1')]
+    sampling_masks = [tensor.ones(sampling_inputs[0].shape),
+                      tensor.ones(sampling_inputs[1].shape)]
+    sampling_src_sel = tensor.vector('sampling_src_sel', dtype=theano.config.floatX)
+    sampling_trg_sel = tensor.vector('sampling_trg_sel', dtype=theano.config.floatX)
 
     # Construct model
     multi_encoder = MultiEncoder(config)
@@ -782,20 +808,6 @@ def main(config, tr_stream, dev_stream):
         logger.info('    {:15}: {}'.format(value.get_value().shape, name))
     logger.info("Total number of parameters: {}".format(len(enc_dec_param_dict)))
 
-    # This block evaluates the encoder annotations
-    f = theano.function(inputs=source_sentences + source_masks +
-                               [src_selector, trg_selector],
-                        outputs=[representation, src_mask, src_selector_rep,
-                                trg_selector_rep])
-    s1 = numpy.random.randint(10, size=(10, 20))
-    s2 = numpy.random.randint(10, size=(10, 30))
-    m1 = numpy.random.rand(10, 20).astype('float32')
-    m2 = numpy.random.rand(10, 30).astype('float32')
-    rep_ = f(s1, s2, m1, m2, [1, 0],[1,])[0]  # this should be of size (20,10,200)
-    rep_ = f(s1, s2, m1, m2, [0, 1],[1,])[0]  # this should be of size (30,10,200)
-
-    rep_, s_mask, s_rep, t_rep = f(s1, s2, m1, m2, [1, 0], [1,])  # this should be of size (20,10,200)
-
     # Set up training algorithm
     algorithm = GradientDescent(
         cost=cost, params=cg.parameters,
@@ -803,21 +815,35 @@ def main(config, tr_stream, dev_stream):
                                  eval(config['step_rule'])()])
     )
 
+    # Set up beam search and sampling computation graphs
+    sampling_rep, src_mask,\
+        src_selector_rep, trg_selector_rep =\
+        multi_encoder.apply(sampling_inputs, sampling_masks,
+                            sampling_src_sel, sampling_trg_sel)
+
+    generated = decoder.generate(sampling_inputs, sampling_rep,
+                                 sampling_src_sel, sampling_trg_sel,
+                                 src_selector_rep, trg_selector_rep)
+
     # Set up training model
     training_model = Model(cost)
+
+    # Set up sampling model
+    search_model = Model(generated)
 
     # Set extensions
     extensions = [
         TrainingDataMonitoring([cost], after_batch=True),
         Printing(after_batch=True),
         stream_fide_en.PrintMultiStream(after_batch=True),
-        Plot('FiDe-En', channels=[['decoder_cost_cost']],
-             after_batch=True),
+        #        Plot('FiDe-En', channels=[['decoder_cost_cost']],
+        #     after_batch=True),
         Dump(config['saveto'], every_n_batches=config['save_freq'])
     ]
 
     # Add sampling for multi encoder
-    extensions += [MultiSampler(training_model, tr_stream, config)]
+    extensions += [MultiEncSampler(search_model, tr_stream, config,
+                                   every_n_batches=config['sampling_freq'])]
 
     # Initialize main loop
     main_loop = MainLoop(

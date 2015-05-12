@@ -64,21 +64,20 @@ class MultiEncStream(Transformer, six.Iterator):
 
     def __next__(self):
         batch = next(self.curr_epoch_iterator)
-        batch['src_selector'] = self.curr_id
-        self._add_selectors(batch)
-        self._add_missing_sources(batch)
+        self._add_selectors(batch, self.curr_id)
+        self._add_missing_sources(batch, self.curr_id)
         self._update_counters()
         return batch
 
-    def _add_selectors(self, batch):
+    def _add_selectors(self, batch, src_id):
         """Set src and target selector vectors"""
         batch['src_selector'] = numpy.zeros(
             (self.num_encs,)).astype(theano.config.floatX)
-        batch['src_selector'][self.curr_id] = 1.
+        batch['src_selector'][src_id] = 1.
         batch['trg_selector'] = numpy.tile(
             1., (1,)).astype(theano.config.floatX)
 
-    def _add_missing_sources(self, batch):
+    def _add_missing_sources(self, batch, src_id):
 
         # Find missing source language
         missing_idx = [k for k in xrange(self.num_encs)
@@ -86,8 +85,8 @@ class MultiEncStream(Transformer, six.Iterator):
 
         # Add sequence of -1  and mask of zeros
         for idx in missing_idx:
-            ref_seq = batch['source_%d' % self.curr_id]
-            ref_msk = batch['source_%d_mask' % self.curr_id]
+            ref_seq = batch['source_%d' % src_id]
+            ref_msk = batch['source_%d_mask' % src_id]
             batch['source_%d' % idx] = numpy.zeros_like(ref_seq) * -1
             batch['source_%d_mask' % idx] = numpy.zeros_like(ref_msk) * 0.
 
@@ -102,6 +101,15 @@ class MultiEncStream(Transformer, six.Iterator):
             self.counters[self.curr_id] = 0
             self.curr_id = (vict_idx[0] + 1) % len(self.streams)
             self.curr_epoch_iterator = self.epoch_iterators[self.curr_id]
+
+    def get_batches_from_all_streams(self):
+        batches = []
+        for i in xrange(self.num_encs):
+            batch = next(self.epoch_iterators[i])
+            self._add_selectors(batch, i)
+            self._add_missing_sources(batch, i)
+            batches.append(batch)
+        return batches
 
 
 # If you wrap following functions, main_loop cannot be pickled ****************

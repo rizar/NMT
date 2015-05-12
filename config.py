@@ -193,7 +193,7 @@ def get_config_wmt15_fide_en_TEST():
     config['val_burn_in'] = 0
 
     # Monitoring related
-    config['hook_samples'] = 1
+    config['hook_samples'] = 2
 
     #return ReadOnlyDict(config)
     return config
@@ -215,7 +215,7 @@ def get_config_wmt15_fide_en():
     config['src_rep_dim'] = 500  # Annotation dim for src_selector
     config['trg_rep_dim'] = 200  # Annotation dim for trg_selector
     config['representation_dim'] = 2000  # this is the joint annotation
-                                        # dimension of encoders
+                                         # dimension of encoders
     config['saveto'] = 'multiEnc_FIDE'
 
     # Optimization related
