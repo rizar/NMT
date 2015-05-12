@@ -6,6 +6,7 @@ import numpy
 import logging
 import pprint
 import theano
+from collections import Counter
 from theano import tensor
 from theano.ifelse import ifelse
 from toolz import merge
@@ -32,6 +33,7 @@ from blocks.bricks.lookup import LookupTable
 from blocks.bricks.parallel import Fork, Parallel, Distribute
 from blocks.bricks.recurrent import (GatedRecurrent, Bidirectional, recurrent,
                                      BaseRecurrent)
+from blocks.select import Selector
 from blocks.bricks.sequence_generators import (
     LookupFeedback, Readout, SoftmaxEmitter,
     BaseSequenceGenerator
@@ -731,21 +733,6 @@ def main(config, tr_stream, dev_stream):
     target_sentence = tensor.lmatrix('target')
     target_sentence_mask = tensor.matrix('target_mask')
 
-    '''
-    theano.config.compute_test_value = 'warn'
-    src_selector.tag.test_value = numpy.asarray([1, 0]).astype('float32')
-    trg_selector.tag.test_value = numpy.asarray([1,]).astype('float32')
-    source_sentences[0].tag.test_value = numpy.random.randint(10, size=(10, 12))
-    source_sentences[1].tag.test_value = numpy.random.randint(10, size=(10, 22))
-    source_masks[0].tag.test_value = \
-        numpy.random.rand(10, 12).astype('float32')
-    source_masks[0].tag.test_value = \
-        numpy.zeros((10, 12)).astype('float32')
-    target_sentence.tag.test_value = numpy.random.randint(10, size=(10, 14))
-    target_sentence_mask.tag.test_value = \
-        numpy.random.rand(10, 14).astype('float32')
-    '''
-
     # Construct model
     multi_encoder = MultiEncoder(config)
     decoder = Decoder(vocab_size=config['trg_vocab_size'],
@@ -780,8 +767,23 @@ def main(config, tr_stream, dev_stream):
 
     cg = ComputationGraph(cost)
 
+    # Print shapes
+    shapes = [param.get_value().shape for param in cg.parameters]
+    logger.info("Parameter shapes: ")
+    for shape, count in Counter(shapes).most_common():
+        logger.info('    {:15}: {}'.format(shape, count))
+    logger.info("Total number of parameters: {}".format(len(shapes)))
+
+    # Print parameter names
+    enc_dec_param_dict = merge(Selector(multi_encoder).get_params(),
+                               Selector(decoder).get_params())
+    logger.info("Parameter names: ")
+    for name, value in enc_dec_param_dict.iteritems():
+        logger.info('    {:15}: {}'.format(value.get_value().shape, name))
+    logger.info("Total number of parameters: {}".format(len(enc_dec_param_dict)))
+
     # This block evaluates the encoder annotations
-    f = theano.function(inputs=source_sentences + source_masks +\
+    f = theano.function(inputs=source_sentences + source_masks +
                                [src_selector, trg_selector],
                         outputs=[representation, src_mask, src_selector_rep,
                                 trg_selector_rep])
@@ -793,11 +795,6 @@ def main(config, tr_stream, dev_stream):
     rep_ = f(s1, s2, m1, m2, [0, 1],[1,])[0]  # this should be of size (30,10,200)
 
     rep_, s_mask, s_rep, t_rep = f(s1, s2, m1, m2, [1, 0], [1,])  # this should be of size (20,10,200)
-
-
-    # This block checks the decoder output
-    g = theano.function
-
 
     # Set up training algorithm
     algorithm = GradientDescent(
@@ -818,6 +815,9 @@ def main(config, tr_stream, dev_stream):
              after_batch=True),
         Dump(config['saveto'], every_n_batches=config['save_freq'])
     ]
+
+    # Add sampling for multi encoder
+    extensions += [MultiSampler(training_model, tr_stream, config)]
 
     # Initialize main loop
     main_loop = MainLoop(
