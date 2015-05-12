@@ -32,8 +32,10 @@ class PrintMultiStream(SimpleExtension):
 
     def do(self, which_callback, *args):
         counters = self.main_loop.data_stream.training_counter
+        epochs = self.main_loop.data_stream.epoch_counter
         sid = self.main_loop.data_stream.curr_id
-        msg = ['source_{}:[{}]'.format(i, c) for i, c in enumerate(counters)]
+        msg = ['source_{}:iter[{}]-epoch[{}]'.format(i, c, e) for i, (c, e) in
+                enumerate(zip(counters, epochs))]
         print("Multi-stream status:")
         print "\t", "Using stream: source_{}".format(sid)
         print "\t", " ".join(msg)
@@ -50,6 +52,7 @@ class MultiEncStream(Transformer, six.Iterator):
         self.curr_epoch_iterator = None
         self.num_encs = len(streams)
         self.training_counter = numpy.zeros_like(self.counters)
+        self.epoch_counter = numpy.zeros_like(self.counters)
         self.batch_sizes = batch_sizes
 
         # Get all epoch iterators
@@ -63,7 +66,8 @@ class MultiEncStream(Transformer, six.Iterator):
         return self
 
     def __next__(self):
-        batch = next(self.curr_epoch_iterator)
+        batch = self._get_batch_with_reset(
+                self.epoch_iterators[self.curr_id])
         self._add_selectors(batch, self.curr_id)
         self._add_missing_sources(batch, self.curr_id)
         self._update_counters()
@@ -105,11 +109,36 @@ class MultiEncStream(Transformer, six.Iterator):
     def get_batches_from_all_streams(self):
         batches = []
         for i in xrange(self.num_encs):
-            batch = next(self.epoch_iterators[i])
+            batch = self._get_batch_with_reset(self.epoch_iterators[i])
             self._add_selectors(batch, i)
             self._add_missing_sources(batch, i)
             batches.append(batch)
         return batches
+
+    def _get_attr_rec(self, obj, attr):
+        return self._get_attr_rec(getattr(obj, attr), attr) \
+            if hasattr(obj, attr) else obj
+
+    def _get_batch_with_reset(self, epoch_iterator):
+        while True:
+            try:
+                batch = next(epoch_iterator)
+                return batch
+            # TODO: This may not be the only source of exception
+            except:
+                sources = self._get_attr_rec(
+                        epoch_iterator, 'data_stream').data_streams
+                # Reset streams
+                for st in sources:
+                    st.reset()
+                # Increment epoch counter
+                self._update_epoch_counter(epoch_iterator)
+
+    def _update_epoch_counter(self, epoch_iterator):
+        idx = [i for i, t in enumerate(self.epoch_iterators)
+               if t == epoch_iterator][0]
+        self.epoch_counter[idx] += 1
+
 
 
 # If you wrap following functions, main_loop cannot be pickled ****************

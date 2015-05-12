@@ -158,20 +158,19 @@ def get_config_wmt15_fide_en_TEST():
     config['weight_noise_rec'] = False
     config['dropout'] = 1.0
 
-
     # Vocabulary/dataset related
     basedir = '/data/lisatmp3/firatorh/nmt/wmt15/data/fi-en/processed/'
     config['stream'] = 'fide-en'
     config['src_vocab_0'] = basedir + 'vocab.fi.pkl'
     config['src_vocab_1'] = basedir + 'vocab.fi.pkl'
-    config['src_data_0'] = basedir + 'all.tok.clean.shuf.seg1.fi-en.fi'
-    config['src_data_1'] = basedir + 'all.tok.clean.shuf.seg1.fi-en.fi'
+    config['src_data_0'] = basedir + 'all.tok.clean.shuf.seg1.fi-en.fi.TEST'
+    config['src_data_1'] = basedir + 'all.tok.clean.shuf.seg1.fi-en.fi.TEST'
     config['src_vocab_size_0'] = 501
     config['src_vocab_size_1'] = 501
 
     config['trg_vocab'] = basedir + 'vocab.en.pkl'
-    config['trg_data_0'] = basedir + 'all.tok.clean.shuf.fi-en.en'
-    config['trg_data_1'] = basedir + 'all.tok.clean.shuf.fi-en.en'
+    config['trg_data_0'] = basedir + 'all.tok.clean.shuf.fi-en.en.TEST'
+    config['trg_data_1'] = basedir + 'all.tok.clean.shuf.fi-en.en.TEST'
     config['trg_vocab_size'] = 501
 
     config['unk_id'] = 1

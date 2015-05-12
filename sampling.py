@@ -98,9 +98,9 @@ class MultiEncSampler(SimpleExtension, SamplingBase):
                 input_length = self._get_true_length(
                         src_inputs[ss][i], self.src_vocabs[ss])
                 target_length = self._get_true_length(
-                        trg_input[i], self.trg_vocabs[0])
+                        trg_input[i], self.trg_vocabs[ss])
                 sample_length = self._get_true_length(
-                        outputs[i], self.trg_vocabs[0])
+                        outputs[i], self.trg_vocabs[ss])
 
                 print "Input %d: " % ss,\
                       self._idx_to_word(
@@ -108,10 +108,10 @@ class MultiEncSampler(SimpleExtension, SamplingBase):
                           self.src_ivocabs[ss])
                 print "Target: ",\
                       self._idx_to_word(
-                          trg_input[i][:target_length], self.trg_ivocabs[0])
+                          trg_input[i][:target_length], self.trg_ivocabs[ss])
                 print "Sample %d: " % ss,\
                       self._idx_to_word(
-                          outputs[i][:sample_length], self.trg_ivocabs[0])
+                          outputs[i][:sample_length], self.trg_ivocabs[ss])
                 print "Sample cost: ", costs[i][:sample_length].sum()
                 print ""
 
