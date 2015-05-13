@@ -10,7 +10,7 @@ import os
 
 from picklable_itertools import chain, izip, imap, repeat
 
-from fuel import config
+from fuel import config as cfg
 from fuel.datasets import TextFile
 from fuel.schemes import ConstantScheme
 from fuel.streams import DataStream
@@ -20,17 +20,17 @@ from config import get_config_wmt15_fi_en_40k
 
 config = get_config_wmt15_fi_en_40k()
 
-en_vocab, fr_vocab = [os.path.join(config.data_path, 'mt',
+en_vocab, fr_vocab = [os.path.join(cfg.data_path, 'mt',
                                    'vocab.{}.pkl'.format(lang))
                       for lang in ['en', 'fr']]
 
-en_files = [os.path.join(config.data_path, 'mt',
+en_files = [os.path.join(cfg.data_path, 'mt',
                          'all.tok.clean.fr-en.en')]
 
-fr_files = [os.path.join(config.data_path, 'mt',
+fr_files = [os.path.join(cfg.data_path, 'mt',
                          'all.tok.clean.fr-en.fr')]
 
-dev_file = os.path.join(config.data_path, 'mt', 'dev.tok.clean.fr-en.en')
+dev_file = os.path.join(cfg.data_path, 'mt', 'dev.tok.clean.fr-en.en')
 
 
 def _oov_to_unk(sentence_pair, src_vocab_size=config['src_vocab_size'],
