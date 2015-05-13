@@ -32,8 +32,10 @@ class PrintMultiStream(SimpleExtension):
 
     def do(self, which_callback, *args):
         counters = self.main_loop.data_stream.training_counter
+        epochs = self.main_loop.data_stream.epoch_counter
         sid = self.main_loop.data_stream.curr_id
-        msg = ['source_{}:[{}]'.format(i, c) for i, c in enumerate(counters)]
+        msg = ['source_{}:iter[{}]-epoch[{}]'.format(i, c, e) for i, (c, e) in
+                enumerate(zip(counters, epochs))]
         print("Multi-stream status:")
         print "\t", "Using stream: source_{}".format(sid)
         print "\t", " ".join(msg)
@@ -50,6 +52,7 @@ class MultiEncStream(Transformer, six.Iterator):
         self.curr_epoch_iterator = None
         self.num_encs = len(streams)
         self.training_counter = numpy.zeros_like(self.counters)
+        self.epoch_counter = numpy.zeros_like(self.counters)
         self.batch_sizes = batch_sizes
 
         # Get all epoch iterators
@@ -63,22 +66,22 @@ class MultiEncStream(Transformer, six.Iterator):
         return self
 
     def __next__(self):
-        batch = next(self.curr_epoch_iterator)
-        batch['src_selector'] = self.curr_id
-        self._add_selectors(batch)
-        self._add_missing_sources(batch)
+        batch = self._get_batch_with_reset(
+                self.epoch_iterators[self.curr_id])
+        self._add_selectors(batch, self.curr_id)
+        self._add_missing_sources(batch, self.curr_id)
         self._update_counters()
         return batch
 
-    def _add_selectors(self, batch):
+    def _add_selectors(self, batch, src_id):
         """Set src and target selector vectors"""
         batch['src_selector'] = numpy.zeros(
             (self.num_encs,)).astype(theano.config.floatX)
-        batch['src_selector'][self.curr_id] = 1.
+        batch['src_selector'][src_id] = 1.
         batch['trg_selector'] = numpy.tile(
             1., (1,)).astype(theano.config.floatX)
 
-    def _add_missing_sources(self, batch):
+    def _add_missing_sources(self, batch, src_id):
 
         # Find missing source language
         missing_idx = [k for k in xrange(self.num_encs)
@@ -86,8 +89,8 @@ class MultiEncStream(Transformer, six.Iterator):
 
         # Add sequence of -1  and mask of zeros
         for idx in missing_idx:
-            ref_seq = batch['source_%d' % self.curr_id]
-            ref_msk = batch['source_%d_mask' % self.curr_id]
+            ref_seq = batch['source_%d' % src_id]
+            ref_msk = batch['source_%d_mask' % src_id]
             batch['source_%d' % idx] = numpy.zeros_like(ref_seq) * -1
             batch['source_%d_mask' % idx] = numpy.zeros_like(ref_msk) * 0.
 
@@ -102,6 +105,40 @@ class MultiEncStream(Transformer, six.Iterator):
             self.counters[self.curr_id] = 0
             self.curr_id = (vict_idx[0] + 1) % len(self.streams)
             self.curr_epoch_iterator = self.epoch_iterators[self.curr_id]
+
+    def get_batches_from_all_streams(self):
+        batches = []
+        for i in xrange(self.num_encs):
+            batch = self._get_batch_with_reset(self.epoch_iterators[i])
+            self._add_selectors(batch, i)
+            self._add_missing_sources(batch, i)
+            batches.append(batch)
+        return batches
+
+    def _get_attr_rec(self, obj, attr):
+        return self._get_attr_rec(getattr(obj, attr), attr) \
+            if hasattr(obj, attr) else obj
+
+    def _get_batch_with_reset(self, epoch_iterator):
+        while True:
+            try:
+                batch = next(epoch_iterator)
+                return batch
+            # TODO: This may not be the only source of exception
+            except:
+                sources = self._get_attr_rec(
+                        epoch_iterator, 'data_stream').data_streams
+                # Reset streams
+                for st in sources:
+                    st.reset()
+                # Increment epoch counter
+                self._update_epoch_counter(epoch_iterator)
+
+    def _update_epoch_counter(self, epoch_iterator):
+        idx = [i for i, t in enumerate(self.epoch_iterators)
+               if t == epoch_iterator][0]
+        self.epoch_counter[idx] += 1
+
 
 
 # If you wrap following functions, main_loop cannot be pickled ****************

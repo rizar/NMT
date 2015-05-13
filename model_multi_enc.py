@@ -6,6 +6,7 @@ import numpy
 import logging
 import pprint
 import theano
+from collections import Counter
 from theano import tensor
 from theano.ifelse import ifelse
 from toolz import merge
@@ -13,6 +14,7 @@ from picklable_itertools.extras import equizip
 
 from blocks.algorithms import (GradientDescent, StepClipping, AdaDelta,
                                CompositeRule)
+from blocks.dump import MainLoopDumpManager
 from blocks.main_loop import MainLoop
 from blocks.model import Model
 from blocks.graph import ComputationGraph
@@ -20,7 +22,7 @@ from blocks.initialization import IsotropicGaussian, Orthogonal, Constant
 from blocks.extensions import Printing
 from blocks.extensions.monitoring import TrainingDataMonitoring
 from blocks.extensions.plot import Plot
-from blocks.extensions.saveload import Dump
+from blocks.extensions.saveload import LoadFromDump, Dump
 
 from blocks.bricks import (Tanh, Maxout, Linear, FeedforwardSequence,
                            Bias, Initializable, MLP, Sigmoid)
@@ -32,6 +34,7 @@ from blocks.bricks.lookup import LookupTable
 from blocks.bricks.parallel import Fork, Parallel, Distribute
 from blocks.bricks.recurrent import (GatedRecurrent, Bidirectional, recurrent,
                                      BaseRecurrent)
+from blocks.select import Selector
 from blocks.bricks.sequence_generators import (
     LookupFeedback, Readout, SoftmaxEmitter,
     BaseSequenceGenerator
@@ -57,6 +60,45 @@ config = getattr(config, args.proto)()
 streams = {'fide-en': stream_fide_en}
 
 
+class MainLoopDumpManagerWMT15(MainLoopDumpManager):
+
+    def load_to(self, main_loop):
+        """Loads the dump from the root folder into the main loop.
+
+        Only difference from super().load_to is the exception handling
+        for each step separately.
+        """
+        try:
+            logger.info("Loading model parameters...")
+            params = self.load_parameters()
+            main_loop.model.set_param_values(params)
+            for p, v in params.iteritems():
+                logger.info("Loaded {:15}: {}".format(v.shape, p))
+            logger.info("Number of parameters loaded: {}".format(len(params)))
+        except Exception as e:
+            logger.error("Error {0}".format(str(e)))
+
+        try:
+            logger.info("Loading iteration state...")
+            main_loop.iteration_state = self.load_iteration_state()
+        except Exception as e:
+            logger.error("Error {0}".format(str(e)))
+
+        try:
+            logger.info("Loading log...")
+            main_loop.log = self.load_log()
+        except Exception as e:
+            logger.error("Error {0}".format(str(e)))
+
+
+class LoadFromDumpWMT15(LoadFromDump):
+    """Wrapper to use MainLoopDumpManagerWMT15"""
+
+    def __init__(self, config_path, **kwargs):
+        super(LoadFromDumpWMT15, self).__init__(config_path, **kwargs)
+        self.manager = MainLoopDumpManagerWMT15(config_path)
+
+
 # Helper class
 class InitializableFeedforwardSequence(FeedforwardSequence, Initializable):
     pass
@@ -74,7 +116,8 @@ class MultiEncoder(Initializable):
                 BidirectionalEncoder(
                     config['src_vocab_size_%d' % i],
                     config['enc_embed_%d' % i],
-                    config['enc_nhids_%d' % i]))
+                    config['enc_nhids_%d' % i],
+                    enc_id=i))
 
         # this is the embedding from h to z
         self.annotation_embedders = [Linear(input_dim=(2 * config['enc_nhids_%d' % i]),
@@ -160,18 +203,22 @@ class BidirectionalWMT15(Bidirectional):
 
 
 class BidirectionalEncoder(Initializable):
-    def __init__(self, vocab_size, embedding_dim, state_dim, **kwargs):
+    def __init__(self, vocab_size, embedding_dim, state_dim, enc_id, **kwargs):
         super(BidirectionalEncoder, self).__init__(**kwargs)
         self.vocab_size = vocab_size
         self.embedding_dim = embedding_dim
         self.state_dim = state_dim
-
         self.lookup = LookupTable(name='embeddings')
-        self.bidir = BidirectionalWMT15(GatedRecurrent(activation=Tanh(), dim=state_dim))
+        self.bidir = BidirectionalWMT15(GatedRecurrent(activation=Tanh(),
+                                                       dim=state_dim))
+        self.name = 'bidirectionalencoder_%d' % enc_id
+
         self.fwd_fork = Fork([name for name in self.bidir.prototype.apply.sequences
-                          if name != 'mask'], prototype=Linear(), name='fwd_fork')
+                             if name != 'mask'], prototype=Linear(),
+                             name='fwd_fork')
         self.back_fork = Fork([name for name in self.bidir.prototype.apply.sequences
-                          if name != 'mask'], prototype=Linear(), name='back_fork')
+                              if name != 'mask'], prototype=Linear(),
+                              name='back_fork')
 
         self.children = [self.lookup, self.bidir, self.fwd_fork, self.back_fork]
 
@@ -780,6 +827,21 @@ def main(config, tr_stream, dev_stream):
 
     cg = ComputationGraph(cost)
 
+    # Print shapes
+    shapes = [param.get_value().shape for param in cg.parameters]
+    logger.info("Parameter shapes: ")
+    for shape, count in Counter(shapes).most_common():
+        logger.info('    {:15}: {}'.format(shape, count))
+    logger.info("Total number of parameters: {}".format(len(shapes)))
+
+    # Print parameter names
+    enc_dec_param_dict = merge(Selector(multi_encoder).get_params(),
+                               Selector(decoder).get_params())
+    logger.info("Parameter names: ")
+    for name, value in enc_dec_param_dict.iteritems():
+        logger.info('    {:15}: {}'.format(value.get_value().shape, name))
+    logger.info("Total number of parameters: {}".format(len(enc_dec_param_dict)))
+
     # This block evaluates the encoder annotations
     f = theano.function(inputs=source_sentences + source_masks +\
                                [src_selector, trg_selector],
@@ -818,6 +880,10 @@ def main(config, tr_stream, dev_stream):
              after_batch=True),
         Dump(config['saveto'], every_n_batches=config['save_freq'])
     ]
+
+    # Reload model if necessary
+    if config['reload']:
+        extensions += [LoadFromDumpWMT15(config['saveto'])]
 
     # Initialize main loop
     main_loop = MainLoop(
