@@ -218,7 +218,7 @@ def get_config_wmt15_fide_en():
     config['trg_rep_dim'] = 200  # Annotation dim for trg_selector
     config['representation_dim'] = 2000  # this is the joint annotation
                                          # dimension of encoders
-    config['saveto'] = 'multiEnc_FIDE2'
+    config['saveto'] = 'multiEnc_FIDE_multiCG'
 
     # Optimization related
     config['batch_size_enc_0'] = 80

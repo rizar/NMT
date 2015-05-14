@@ -69,7 +69,7 @@ class MultiEncStream(Transformer, six.Iterator):
         batch = self._get_batch_with_reset(
                 self.epoch_iterators[self.curr_id])
         self._add_selectors(batch, self.curr_id)
-        self._add_missing_sources(batch, self.curr_id)
+        #self._add_missing_sources(batch, self.curr_id)
         self._update_counters()
         return batch
 
@@ -111,7 +111,7 @@ class MultiEncStream(Transformer, six.Iterator):
         for i in xrange(self.num_encs):
             batch = self._get_batch_with_reset(self.epoch_iterators[i])
             self._add_selectors(batch, i)
-            self._add_missing_sources(batch, i)
+            #self._add_missing_sources(batch, i)
             batches.append(batch)
         return batches
 
@@ -157,7 +157,7 @@ def _too_long(sentence_pair, params):
     seq_len = 50
     if 'seq_len' in params:
         seq_len = params['seq_len']
-    return all([len(sentence) < seq_len
+    return all([len(sentence) <= seq_len
                 for sentence in sentence_pair])
 
 
@@ -189,7 +189,7 @@ ind_streams = []
 for i in xrange(num_encs):
     stream = Merge([src_datasets[i].get_example_stream(),
                     trg_datasets[i].get_example_stream()],
-                   ('source_%d' % i, 'target'))
+                   ('source', 'target'))
     stream = Filter(stream, predicate=_too_long,
                     predicate_args={'seq_len':config['seq_len']})
     stream = Mapping(stream, _oov_to_unk,

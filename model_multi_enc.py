@@ -5,18 +5,24 @@ import argparse
 import numpy
 import logging
 import pprint
+import signal
 import theano
+import traceback
 from collections import Counter
 from theano import tensor
 from theano.ifelse import ifelse
 from toolz import merge
 from picklable_itertools.extras import equizip
 
+from blocks import config as cfg
 from blocks.algorithms import (GradientDescent, StepClipping, AdaDelta,
-                               CompositeRule)
-from blocks.dump import MainLoopDumpManager
+                               CompositeRule, variable_mismatch_error,
+                               DifferentiableCostMinimizer)
+from blocks.dump import MainLoopDumpManager, save_parameter_values
 from blocks.filter import VariableFilter
-from blocks.main_loop import MainLoop
+from blocks.main_loop import (MainLoop, TrainingFinish,
+                              error_in_error_handling_message,
+                              error_message)
 from blocks.model import Model
 from blocks.graph import ComputationGraph
 from blocks.initialization import IsotropicGaussian, Orthogonal, Constant
@@ -40,7 +46,9 @@ from blocks.bricks.sequence_generators import (
     LookupFeedback, Readout, SoftmaxEmitter,
     BaseSequenceGenerator
 )
-from blocks.utils import dict_union, dict_subset, shared_floatx_nans
+from blocks.utils import (dict_union, dict_subset, shared_floatx_nans,
+                          change_recursion_limit, reraise_as)
+from blocks.utils.profile import Profile, Timer
 
 import config
 import stream_fide_en
@@ -63,6 +71,147 @@ config = getattr(config, args.proto)()
 streams = {'fide-en': stream_fide_en}
 
 
+class TrainingDataMonitoringWithMultiCG(TrainingDataMonitoring):
+    def do(self, callback_name, *args):
+        if callback_name == 'before_training':
+            for i in xrange(self.main_loop.num_cgs):
+                if not isinstance(self.main_loop.algorithm.algorithms[i],
+                                  DifferentiableCostMinimizer):
+                    raise ValueError
+                self.main_loop.algorithm.algorithms[i].add_updates(
+                    self._buffer.accumulation_updates)
+            self._buffer.initialize_aggregators()
+        else:
+            if (self.main_loop.status['iterations_done'] ==
+                    self._last_time_called):
+                raise Exception("TrainingDataMonitoring.do should be invoked"
+                                " no more than once per iteration")
+            self._last_time_called = self.main_loop.status['iterations_done']
+            self.add_records(self.main_loop.log,
+                             self._buffer.get_aggregated_values().items())
+            self._buffer.initialize_aggregators()
+
+
+class MainLoopWithMultiCG(MainLoop):
+
+    def __init__(self, models, **kwargs):
+        self.models = models
+        self.num_cgs = len(models)
+        kwargs['model'] = models[0]
+        super(MainLoopWithMultiCG, self).__init__(**kwargs)
+
+    def run(self):
+        logging.basicConfig()
+
+        for i in xrange(self.num_cgs):
+            if self.models[i] and isinstance(self.algorithm.algorithms[i],
+                                             DifferentiableCostMinimizer):
+                if not self.models[i].get_objective() ==\
+                        self.algorithm.algorithms[i].cost:
+                    logger.warning(
+                            "different costs for model {} and algorithm {}"
+                            .format(i, i))
+                if not (set(self.models[i].get_params().values()) ==
+                        set(self.algorithm.algorithms[i].params)):
+                    logger.warning(
+                        "different params for model {} and algorithm {}"
+                        .format(i, i))
+
+        with change_recursion_limit(cfg.recursion_limit):
+            self.original_sigint_handler = signal.signal(
+                signal.SIGINT, self._handle_epoch_interrupt)
+            self.original_sigterm_handler = signal.signal(
+                signal.SIGTERM, self._handle_batch_interrupt)
+            try:
+                logger.info("Entered the main loop")
+                if not self.status['training_started']:
+                    for extension in self.extensions:
+                        extension.main_loop = self
+                    self._run_extensions('before_training')
+                    with Timer('initialization', self.profile):
+                        self.algorithm.initialize()
+                    self.status['training_started'] = True
+                if self.log.status['iterations_done'] > 0:
+                    self._run_extensions('on_resumption')
+                    self.status['epoch_interrupt_received'] = False
+                    self.status['batch_interrupt_received'] = False
+                with Timer('training', self.profile):
+                    while self._run_epoch():
+                        pass
+            except TrainingFinish:
+                self.log.current_row['training_finished'] = True
+            except Exception as e:
+                self._restore_signal_handlers()
+                self.log.current_row['got_exception'] = traceback.format_exc(e)
+                logger.error("Error occured during training." + error_message)
+                try:
+                    self._run_extensions('on_error')
+                except Exception as inner_e:
+                    logger.error(traceback.format_exc(inner_e))
+                    logger.error("Error occured when running extensions." +
+                                 error_in_error_handling_message)
+                reraise_as(e)
+            finally:
+                if self.log.current_row.get('training_finished', False):
+                    self._run_extensions('after_training')
+                if cfg.profile:
+                    self.profile.report()
+                self._restore_signal_handlers()
+
+
+class GradientDescentWithMultiCG(object):
+
+    def __init__(self, costs, params, step_rule, **kwargs):
+        self.num_cgs = len(costs)
+        self.algorithms = []
+        self._functions = []
+
+        for i in xrange(len(costs)):
+            self.algorithms.append(
+                    GradientDescent(
+                        cost=costs[i], params=params[i],
+                        step_rule=CompositeRule(
+                                [StepClipping(config['step_clipping']),
+                                 step_rule])))
+
+    def initialize(self):
+
+        # Check if both computation graphs have identical inputs
+        inputs = set.intersection(
+                *[set(self.algorithms[i].inputs)
+                    for i in xrange(self.num_cgs)])
+        if not all(
+                [set(self.algorithms[i].inputs) == inputs
+                    for i in xrange(self.num_cgs)]):
+            raise ValueError(
+                    "mismatch of input names between computation graphs")
+
+        for i in xrange(self.num_cgs):
+            logger.info("Initializing the training algorithm {}".format(i))
+            all_updates = self.algorithms[i].updates
+            for param in self.algorithms[i].params:
+                all_updates.append(
+                        (param, param - self.algorithms[i].steps[param]))
+            all_updates += self.algorithms[i].step_rule_updates
+            self._functions.append(theano.function(
+                    self.algorithms[i].inputs, [], updates=all_updates))
+            logger.info("The training algorithm {} is initialized".format(i))
+
+    def process_batch(self, batch):
+        for i in xrange(self.num_cgs):
+            if not set(batch.keys()) == set(
+                    [v.name for v in self.algorithms[i].inputs]):
+                raise ValueError(
+                        "mismatch of variable names and data sources" +
+                        variable_mismatch_error.format(
+                            sources=batch.keys(),
+                            variables=[v.name for v in
+                                       self.algorithms[i].inputs]))
+        cg_id = numpy.argmax(batch['src_selector'])
+        ordered_batch = [batch[v.name] for v in self.algorithms[cg_id].inputs]
+        self._functions[cg_id](*ordered_batch)
+
+
 class MainLoopDumpManagerWMT15(MainLoopDumpManager):
 
     def load_to(self, main_loop):
@@ -72,6 +221,8 @@ class MainLoopDumpManagerWMT15(MainLoopDumpManager):
         for each step separately.
         """
         try:
+            # TODO: load respectively
+            import ipdb;ipdb.set_trace()
             logger.info("Loading model parameters...")
             params = self.load_parameters()
             main_loop.model.set_param_values(params)
@@ -93,12 +244,28 @@ class MainLoopDumpManagerWMT15(MainLoopDumpManager):
         except Exception as e:
             logger.error("Error {0}".format(str(e)))
 
+    def dump_parameters(self, main_loop):
+        params_to_save = []
+        for i in xrange(main_loop.num_cgs):
+            params_to_save.append(
+                    main_loop.models[i].get_param_values())
+        save_parameter_values(merge(params_to_save),
+                              self.path_to_parameters)
 
-class LoadFromDumpWMT15(LoadFromDump):
+
+class DumpWithMultiCG(Dump):
+    """Wrapper to use MainLoopDumpManagerWMT15"""
+    def __init__(self, state_path, **kwargs):
+        kwargs.setdefault("after_training", True)
+        super(DumpWithMultiCG, self).__init__(state_path, **kwargs)
+        self.manager = MainLoopDumpManagerWMT15(state_path)
+
+
+class LoadFromDumpMultiCG(LoadFromDump):
     """Wrapper to use MainLoopDumpManagerWMT15"""
 
     def __init__(self, config_path, **kwargs):
-        super(LoadFromDumpWMT15, self).__init__(config_path, **kwargs)
+        super(LoadFromDumpMultiCG, self).__init__(config_path, **kwargs)
         self.manager = MainLoopDumpManagerWMT15(config_path)
 
 
@@ -109,12 +276,9 @@ class InitializableFeedforwardSequence(FeedforwardSequence, Initializable):
 
 class MultiEncoder(Initializable):
 
-    def __init__(self, src_selector, config, **kwargs):
+    def __init__(self, config, **kwargs):
         super(MultiEncoder, self).__init__(**kwargs)
 
-        self.schedule = config['schedule']
-        self.enc_counters = numpy.zeros_like(self.schedule)
-        self.curr_idx = 0
         self.num_encs = config['num_encs']
         self.encoders = []
         for i in xrange(self.num_encs):
@@ -143,21 +307,13 @@ class MultiEncoder(Initializable):
             [self.src_selector_embedder, self.trg_selector_embedder]
 
     @application
-    def apply(self, source_sentences, source_masks, src_selector, trg_selector):
+    def apply(self, source_sentence, source_mask,
+              src_selector, trg_selector, enc_idx):
 
         # Projected Annotations
-        rep = ifelse(
-                theano.tensor.eq(src_selector[0], 1.),
-                self.annotation_embedders[0].apply(
-                    self.encoders[0].apply(source_sentences[0], source_masks[0])),
-                self.annotation_embedders[1].apply(
-                 self.encoders[1].apply(source_sentences[1], source_masks[1]))
-        )
-
-        # Source mask
-        mask = ifelse(
-                theano.tensor.eq(src_selector[0], 1.),
-                source_masks[0], source_masks[1])
+        rep = self.annotation_embedders[enc_idx].apply(
+                    self.encoders[enc_idx].apply(
+                        source_sentence, source_mask))
 
         # Source selector annotations, expand it to have batch size
         # dimensions for further ease in recurrence
@@ -170,7 +326,7 @@ class MultiEncoder(Initializable):
                 theano.tensor.repeat(
                     trg_selector[None, :], rep.shape[1], axis=0)
         )
-        return rep, mask, src_selector_rep, trg_selector_rep
+        return rep, src_selector_rep, trg_selector_rep
 
 
 class LookupFeedbackWMT15(LookupFeedback):
@@ -793,20 +949,22 @@ class Decoder(Initializable):
 def main(config, tr_stream, dev_streams):
 
     # Create Theano variables
+    # Training
     src_selector = tensor.vector('src_selector', dtype=theano.config.floatX)
     trg_selector = tensor.vector('trg_selector', dtype=theano.config.floatX)
-    source_sentences = [tensor.lmatrix('source_0'), tensor.lmatrix('source_1')]
-    source_masks = [tensor.matrix('source_0_mask'), tensor.matrix('source_1_mask')]
+    source_sentence = tensor.lmatrix('source')
+    source_mask = tensor.matrix('source_mask')
     target_sentence = tensor.lmatrix('target')
     target_sentence_mask = tensor.matrix('target_mask')
-    sampling_inputs = [tensor.lmatrix('input_0'), tensor.lmatrix('input_1')]
-    sampling_masks = [tensor.ones(sampling_inputs[0].shape),
-                      tensor.ones(sampling_inputs[1].shape)]
+
+    # Sampling
+    sampling_input = tensor.lmatrix('input')
+    sampling_mask = tensor.ones(sampling_input.shape)
     sampling_src_sel = tensor.vector('sampling_src_sel', dtype=theano.config.floatX)
     sampling_trg_sel = tensor.vector('sampling_trg_sel', dtype=theano.config.floatX)
 
     # Construct model
-    multi_encoder = MultiEncoder(src_selector, config)
+    multi_encoder = MultiEncoder(config)
     decoder = Decoder(vocab_size=config['trg_vocab_size'],
                       embedding_dim=config['dec_embed'],
                       state_dim=config['dec_nhids'],
@@ -816,19 +974,25 @@ def main(config, tr_stream, dev_streams):
                       src_rep_dim=config['src_rep_dim'],
                       trg_rep_dim=config['trg_rep_dim'],
                       num_encs=config['num_encs'])
-    representation, src_mask, src_selector_rep, trg_selector_rep =\
-        multi_encoder.apply(source_sentences, source_masks,
-                            src_selector, trg_selector)
 
-    cost = decoder.cost(
-        representation, src_mask, target_sentence, target_sentence_mask,
-        src_selector_rep, trg_selector_rep)
+    # Get costs from each encoder sources
+    costs = []
+    for i in xrange(config['num_encs']):
+        representation, src_selector_rep, trg_selector_rep =\
+            multi_encoder.apply(source_sentence, source_mask,
+                                src_selector, trg_selector, i)
+        costs.append(
+                decoder.cost(
+                    representation, source_mask,
+                    target_sentence, target_sentence_mask,
+                    src_selector_rep, trg_selector_rep))
+        costs[i].name += "_{}".format(i)
 
     # Initialize model
     multi_encoder.weights_init = IsotropicGaussian(config['weight_scale'])
     multi_encoder.biases_init = Constant(0)
     multi_encoder.push_initialization_config()
-    for i, _ in enumerate(source_sentences):
+    for i in xrange(config['num_encs']):
         multi_encoder.encoders[i].bidir.prototype.weights_init = Orthogonal()
     multi_encoder.initialize()
     decoder.weights_init = IsotropicGaussian(config['weight_scale'])
@@ -837,14 +1001,31 @@ def main(config, tr_stream, dev_streams):
     decoder.transition.weights_init = Orthogonal()
     decoder.initialize()
 
-    cg = ComputationGraph(cost)
+    # Get computation graphs
+    cgs = []
+    for i in xrange(config['num_encs']):
+        cgs.append(ComputationGraph(costs[i]))
 
-    # Print shapes
-    shapes = [param.get_value().shape for param in cg.parameters]
-    logger.info("Parameter shapes: ")
-    for shape, count in Counter(shapes).most_common():
-        logger.info('    {:15}: {}'.format(shape, count))
-    logger.info("Total number of parameters: {}".format(len(shapes)))
+        # Print shapes
+        shapes = [param.get_value().shape for param in cgs[i].parameters]
+        logger.info("Parameter shapes for computation graph[{}]".format(i))
+        for shape, count in Counter(shapes).most_common():
+            logger.info('    {:15}: {}'.format(shape, count))
+        logger.info(
+            "Total number of parameters for computation graph[{}]: {}"
+            .format(i, len(shapes)))
+
+        logger.info("Parameter names for computation graph[{}]: ".format(i))
+        enc_dec_param_dict = merge(
+                Selector(multi_encoder.encoders[i]).get_params(),
+                Selector(multi_encoder.annotation_embedders[i]).get_params(),
+                Selector(multi_encoder.src_selector_embedder).get_params(),
+                Selector(multi_encoder.trg_selector_embedder).get_params(),
+                Selector(decoder).get_params())
+        for name, value in enc_dec_param_dict.iteritems():
+            logger.info('    {:15}: {}'.format(value.get_value().shape, name))
+        logger.info("Total number of parameters for computation graph[{}]: {}"
+                    .format(i, len(enc_dec_param_dict)))
 
     # Print parameter names
     enc_dec_param_dict = merge(Selector(multi_encoder).get_params(),
@@ -855,16 +1036,17 @@ def main(config, tr_stream, dev_streams):
     logger.info("Total number of parameters: {}".format(len(enc_dec_param_dict)))
 
     # Set up training algorithm
-    algorithm = GradientDescent(
-        cost=cost, params=cg.parameters,
+    algorithm = GradientDescentWithMultiCG(
+        costs=costs, params=[cgs[i].parameters for i in xrange(len(cgs))],
         step_rule=CompositeRule([StepClipping(config['step_clipping']),
                                  eval(config['step_rule'])()])
     )
 
+    """
     # Set up beam search and sampling computation graphs
-    sampling_rep, src_mask,\
+    sampling_rep,\
         src_selector_rep, trg_selector_rep =\
-        multi_encoder.apply(sampling_inputs, sampling_masks,
+        multi_encoder.apply(sampling_input, sampling_mask,
                             sampling_src_sel, sampling_trg_sel)
 
     generated = decoder.generate(sampling_inputs, sampling_rep,
@@ -874,41 +1056,45 @@ def main(config, tr_stream, dev_streams):
         bricks=[decoder.sequence_generator], name="outputs")(
             ComputationGraph(generated[1]))  # generated[1] is the next_outputs
 
-    # Set up training model
-    training_model = Model(cost)
-
     # Set up sampling model
     search_model = Model(generated)
+    """
+
+    # Set up training model
+    training_models = []
+    for i in xrange(config['num_encs']):
+        training_models.append(Model(costs[i]))
 
     # Set extensions
     extensions = [
-        TrainingDataMonitoring([cost], after_batch=True),
         Printing(after_batch=True),
+        #TrainingDataMonitoringWithMultiCG(costs, after_batch=True),
         stream_fide_en.PrintMultiStream(after_batch=True),
-        Plot('FiDe-En', channels=[['decoder_cost_cost']],
-             after_batch=True),
-        Dump(config['saveto'], every_n_batches=config['save_freq'])
+        #Plot('FiDe-En', channels=[['decoder_cost_cost']],
+        #     after_batch=True),
+        DumpWithMultiCG(state_path=config['saveto'],
+                        every_n_batches=config['save_freq'])
     ]
 
     # Reload model if necessary
     if config['reload']:
-        extensions.append(LoadFromDumpWMT15(config['saveto']))
+        extensions.append(LoadFromDumpMultiCG(config['saveto']))
 
+    """
     # Add sampling for multi encoder
     extensions.append(MultiEncSampler(
         search_model, tr_stream, config,
         every_n_batches=config['sampling_freq']))
 
     # Add bleu validator for multi encoder
-    """
     extensions.append(MultiEncBleuValidator(
         sampling_inputs, samples, search_model, dev_streams, config,
         every_n_batches=config['bleu_val_freq']))
     """
 
     # Initialize main loop
-    main_loop = MainLoop(
-        model=training_model,
+    main_loop = MainLoopWithMultiCG(
+        models=training_models,
         algorithm=algorithm,
         data_stream=tr_stream,
         extensions=extensions
