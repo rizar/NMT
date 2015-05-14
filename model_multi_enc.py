@@ -15,6 +15,7 @@ from picklable_itertools.extras import equizip
 from blocks.algorithms import (GradientDescent, StepClipping, AdaDelta,
                                CompositeRule)
 from blocks.dump import MainLoopDumpManager
+from blocks.filter import VariableFilter
 from blocks.main_loop import MainLoop
 from blocks.model import Model
 from blocks.graph import ComputationGraph
@@ -44,7 +45,7 @@ from blocks.utils import dict_union, dict_subset, shared_floatx_nans
 import config
 import stream_fide_en
 
-from sampling import MultiEncSampler
+from sampling import MultiEncSampler, MultiEncBleuValidator
 
 logger = logging.getLogger(__name__)
 
@@ -108,9 +109,12 @@ class InitializableFeedforwardSequence(FeedforwardSequence, Initializable):
 
 class MultiEncoder(Initializable):
 
-    def __init__(self, config, **kwargs):
+    def __init__(self, src_selector, config, **kwargs):
         super(MultiEncoder, self).__init__(**kwargs)
 
+        self.schedule = config['schedule']
+        self.enc_counters = numpy.zeros_like(self.schedule)
+        self.curr_idx = 0
         self.num_encs = config['num_encs']
         self.encoders = []
         for i in xrange(self.num_encs):
@@ -158,17 +162,13 @@ class MultiEncoder(Initializable):
         # Source selector annotations, expand it to have batch size
         # dimensions for further ease in recurrence
         src_selector_rep = self.src_selector_embedder.apply(
-                #theano.tensor.repeat(
                 theano.tensor.repeat(
-                    src_selector[None, :], rep.shape[1], axis=0)  #[None, :, :]
-                #,rep.shape[0], axis=0)
+                    src_selector[None, :], rep.shape[1], axis=0)
         )
         # Target selector annotations, expand it similarly
         trg_selector_rep = self.trg_selector_embedder.apply(
-                #theano.tensor.repeat(
                 theano.tensor.repeat(
-                    trg_selector[None, :], rep.shape[1], axis=0)  #[None, :, :]
-                #,rep.shape[0], axis=0)
+                    trg_selector[None, :], rep.shape[1], axis=0)
         )
         return rep, mask, src_selector_rep, trg_selector_rep
 
@@ -213,6 +213,7 @@ class BidirectionalEncoder(Initializable):
         self.lookup = LookupTable(name='embeddings')
         self.bidir = BidirectionalWMT15(GatedRecurrent(activation=Tanh(),
                                                        dim=state_dim))
+        self.enc_id = enc_id
         self.name = 'bidirectionalencoder_%d' % enc_id
 
         self.fwd_fork = Fork([name for name in self.bidir.prototype.apply.sequences
@@ -241,7 +242,7 @@ class BidirectionalEncoder(Initializable):
         # Time as first dimension
         source_sentence = source_sentence.T
         source_sentence_mask = source_sentence_mask.T
-
+        source_sentence = theano.printing.Print("Encoder{}:source sentence".format(self.enc_id), ['shape'])(source_sentence)
         embeddings = self.lookup.apply(source_sentence)
 
         representation = self.bidir.apply(
@@ -789,7 +790,7 @@ class Decoder(Initializable):
             glimpses=self.attention.take_glimpses.outputs[0])
 
 
-def main(config, tr_stream, dev_stream):
+def main(config, tr_stream, dev_streams):
 
     # Create Theano variables
     src_selector = tensor.vector('src_selector', dtype=theano.config.floatX)
@@ -805,7 +806,7 @@ def main(config, tr_stream, dev_stream):
     sampling_trg_sel = tensor.vector('sampling_trg_sel', dtype=theano.config.floatX)
 
     # Construct model
-    multi_encoder = MultiEncoder(config)
+    multi_encoder = MultiEncoder(src_selector, config)
     decoder = Decoder(vocab_size=config['trg_vocab_size'],
                       embedding_dim=config['dec_embed'],
                       state_dim=config['dec_nhids'],
@@ -869,6 +870,9 @@ def main(config, tr_stream, dev_stream):
     generated = decoder.generate(sampling_inputs, sampling_rep,
                                  sampling_src_sel, sampling_trg_sel,
                                  src_selector_rep, trg_selector_rep)
+    samples, = VariableFilter(
+        bricks=[decoder.sequence_generator], name="outputs")(
+            ComputationGraph(generated[1]))  # generated[1] is the next_outputs
 
     # Set up training model
     training_model = Model(cost)
@@ -888,11 +892,19 @@ def main(config, tr_stream, dev_stream):
 
     # Reload model if necessary
     if config['reload']:
-        extensions += [LoadFromDumpWMT15(config['saveto'])]
+        extensions.append(LoadFromDumpWMT15(config['saveto']))
 
     # Add sampling for multi encoder
-    extensions += [MultiEncSampler(search_model, tr_stream, config,
-                                   every_n_batches=config['sampling_freq'])]
+    extensions.append(MultiEncSampler(
+        search_model, tr_stream, config,
+        every_n_batches=config['sampling_freq']))
+
+    # Add bleu validator for multi encoder
+    """
+    extensions.append(MultiEncBleuValidator(
+        sampling_inputs, samples, search_model, dev_streams, config,
+        every_n_batches=config['bleu_val_freq']))
+    """
 
     # Initialize main loop
     main_loop = MainLoop(
@@ -909,5 +921,6 @@ def main(config, tr_stream, dev_stream):
 if __name__ == "__main__":
     logger.info("Model options:\n{}".format(pprint.pformat(config)))
     tr_stream = streams[config['stream']].multi_enc_stream
-    main(config, tr_stream, None)
+    dev_streams = streams[config['stream']].dev_streams
+    main(config, tr_stream, dev_streams)
 

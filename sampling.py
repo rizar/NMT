@@ -80,8 +80,9 @@ class MultiEncSampler(SimpleExtension, SamplingBase):
                     self.config['batch_size_enc_%d' % ss],
                     self.config['hook_samples'], replace=False)
 
+            # TODO: reversed should be removed, check model.inputs
             src_inputs = [batch[source_names[ii]][sample_idx, :]
-                          for ii in xrange(self.num_encs)]
+                          for ii in reversed(xrange(self.num_encs))]
             trg_input = batch[streams[ss].mask_sources[1]][sample_idx, :]
 
             src_selector = batch['src_selector']
@@ -205,24 +206,71 @@ class Sampler(SimpleExtension, SamplingBase):
             print ""
 
 
+class MultiEncBleuValidator(SimpleExtension, SamplingBase):
+    def __init__(self, source_sentences, samples, model, data_streams,
+                 config, n_best=1, track_n_models=1, **kwargs):
+        super(MultiEncBleuValidator, self).__init__(**kwargs)
+        self.source_sentences = source_sentences
+        self.samples = samples
+        self.model = model
+        self.data_streams = data_streams
+        self.config = config
+        self.n_best = n_best
+        self.track_n_models = track_n_models
+
+        # TODO: source_sentences might be inverted
+        # Create a BleuValidator for each stream
+        self.bleu_validators = []
+        for i in xrange(config['num_encs']):
+            self.bleu_validators.append(
+                    BleuValidator(
+                        source_sentences[i], samples, model,
+                        data_stream=data_streams[i],
+                        n_best=n_best, track_n_models=track_n_models,
+                        bleu_script=config['bleu_script'],
+                        val_set_out=config['val_set_out_%d' % i],
+                        val_set_grndtruth=config['val_set_grndtruth_%d' % i],
+                        val_burn_in=config['val_burn_in'],
+                        beam_size=config['beam_size'],
+                        _reload=config['reload'], enc_id=i,
+                        saveto=config['saveto']))
+            self.bleu_validators[i].main_loop = self.main_loop
+
+    def do(self, which_callback, *args):
+        """Calls BleuValidator of each data stream"""
+        import ipdb;ipdb.set_trace()
+        for validator in self.bleu_validators:
+            validator.do(which_callback, *args)
+
+
 class BleuValidator(SimpleExtension, SamplingBase):
 
     def __init__(self, source_sentence, samples, model, data_stream,
-                 config, n_best=1, track_n_models=1, trg_ivocab=None,
+                 bleu_script, val_set_out, val_set_grndtruth,
+                 n_best=1, track_n_models=1, trg_ivocab=None,
+                 beam_size=5, val_burn_in=10000,
+                 _reload=True, enc_id=None, saveto=None,
                  **kwargs):
         super(BleuValidator, self).__init__(**kwargs)
         self.source_sentence = source_sentence
         self.samples = samples
         self.model = model
         self.data_stream = data_stream
-        self.config = config
+        self.bleu_script = bleu_script
+        self.val_set_out = val_set_out
+        self.val_set_grndtruth = val_set_grndtruth
         self.n_best = n_best
         self.track_n_models = track_n_models
-        self.verbose = config.get('val_set_out', None)
+        self.trg_ivocab = trg_ivocab
+        self.beam_size = beam_size
+        self.val_burn_in = val_burn_in
+        self._reload = _reload
+        self.enc_id = enc_id if enc_id else 0
+        self.saveto = saveto if saveto else '.'
+        self.verbose = val_set_out
 
         # Helpers
         self.vocab = data_stream.dataset.dictionary
-        self.trg_ivocab = trg_ivocab
         self.unk_sym = data_stream.dataset.unk_token
         self.eos_sym = data_stream.dataset.eos_token
         self.unk_idx = self.vocab[self.unk_sym]
@@ -230,19 +278,19 @@ class BleuValidator(SimpleExtension, SamplingBase):
         self.best_models = []
         self.val_bleu_curve = []
         self.beam_search = BeamSearch(source_sentence,
-                                      beam_size=self.config['beam_size'],
+                                      beam_size=beam_size,
                                       samples=samples)
-        self.multibleu_cmd = ['perl', self.config['bleu_script'],
-                              self.config['val_set_grndtruth'], '<']
+        self.multibleu_cmd = ['perl', bleu_script, val_set_grndtruth, '<']
 
         # Create saving directory if it does not exist
-        if not os.path.exists(self.config['saveto']):
-            os.makedirs(self.config['saveto'])
+        if not os.path.exists(saveto):
+            os.makedirs(saveto)
 
-        if self.config['reload']:
+        if self._reload:
             try:
-                bleu_score = numpy.load(os.path.join(self.config['saveto'],
-                                        'val_bleu_scores.npz'))
+                bleu_score = numpy.load(
+                        os.path.join(
+                            saveto, 'val_bleu_scores{}.npz'.format(enc_id)))
                 self.val_bleu_curve = bleu_score['bleu_scores'].tolist()
 
                 # Track n best previous bleu scores
@@ -256,9 +304,9 @@ class BleuValidator(SimpleExtension, SamplingBase):
 
     def do(self, which_callback, *args):
 
+        import ipdb;ipdb.set_trace()
         # Track validation burn in
-        if self.main_loop.status['iterations_done'] <= \
-                self.config['val_burn_in']:
+        if self.main_loop.status['iterations_done'] <= self.val_burn_in:
             return
 
         # Get current model parameters
@@ -282,7 +330,7 @@ class BleuValidator(SimpleExtension, SamplingBase):
             self.trg_ivocab = {v: k for k, v in trg_vocab.items()}
 
         if self.verbose:
-            ftrans = open(self.config['val_set_out'], 'w')
+            ftrans = open(self.val_set_out, 'w')
 
         for i, line in enumerate(self.data_stream.get_epoch_iterator()):
             """
@@ -290,7 +338,7 @@ class BleuValidator(SimpleExtension, SamplingBase):
             """
 
             seq = self._oov_to_unk(line[0])
-            input_ = numpy.tile(seq, (self.config['beam_size'], 1))
+            input_ = numpy.tile(seq, (self.beam_size, 1))
 
             # draw sample, checking to ensure we don't get an empty string back
             trans, costs = \
@@ -353,7 +401,7 @@ class BleuValidator(SimpleExtension, SamplingBase):
 
     def _save_model(self, bleu_score):
         if self._is_valid_to_save(bleu_score):
-            model = ModelInfo(bleu_score, self.config['saveto'])
+            model = ModelInfo(bleu_score, self.saveto, self.enc_id)
 
             # Manage n-best model list first
             if len(self.best_models) >= self.track_n_models:
@@ -370,18 +418,21 @@ class BleuValidator(SimpleExtension, SamplingBase):
             s = signal.signal(signal.SIGINT, signal.SIG_IGN)
             logger.info("Saving new model {}".format(model.path))
             numpy.savez(model.path, **self.main_loop.model.get_param_values())
-            numpy.savez(os.path.join(self.config['saveto'],'val_bleu_scores.npz'),
-                        bleu_scores=self.val_bleu_curve)
+            numpy.savez(
+                    os.path.join(
+                        self.saveto,
+                        'val_bleu_scores{}.npz'.format(self.enc_id)),
+                    bleu_scores=self.val_bleu_curve)
             signal.signal(signal.SIGINT, s)
 
 
 class ModelInfo:
-    def __init__(self, bleu_score, path=None):
+    def __init__(self, bleu_score, path=None, enc_id=None):
         self.bleu_score = bleu_score
-        self.path = self._generate_path(path)
+        self.enc_id = enc_id if enc_id else ''
+        self.path = self._generate_path(path) if path else None
 
     def _generate_path(self, path):
-        gen_path = os.path.join(
-            path, 'best_bleu_model_%d_BLEU%.2f.npz' %
-            (int(time.time()), self.bleu_score) if path else None)
-        return gen_path
+        return os.path.join(
+                path, 'best_bleu_model{}_{}_BLEU{:.2f}.npz'.format(
+                    self.enc_id, int(time.time()), self.bleu_score))

@@ -178,17 +178,20 @@ def get_config_wmt15_fide_en_TEST():
     # Early stopping based on bleu related
     config['normalized_bleu'] = True
     config['bleu_script'] = '/data/lisatmp3/firatorh/turkishParallelCorpora/iwslt14/scripts/multi-bleu.perl'
-    config['val_set'] = '/data/lisatmp3/firatorh/nmt/wmt15/data/fi-en/dev/newsdev2015_TEST.tok.seg.fi'
-    config['val_set_grndtruth'] = '/data/lisatmp3/firatorh/nmt/wmt15/data/fi-en/dev/newsdev2015_TEST.tok.en'
-    config['val_set_out'] = 'multiEnc_TEST/validation_out.txt'
+    config['val_set_0'] = '/data/lisatmp3/firatorh/nmt/wmt15/data/fi-en/dev/newsdev2015_TEST.tok.seg.fi'
+    config['val_set_1'] = '/data/lisatmp3/firatorh/nmt/wmt15/data/fi-en/dev/newsdev2015_TEST.tok.seg.fi'
+    config['val_set_grndtruth_0'] = '/data/lisatmp3/firatorh/nmt/wmt15/data/fi-en/dev/newsdev2015_TEST.tok.en'
+    config['val_set_grndtruth_1'] = '/data/lisatmp3/firatorh/nmt/wmt15/data/fi-en/dev/newsdev2015_TEST.tok.en'
+    config['val_set_out_0'] = 'multiEnc_TEST/validation_out_0.txt'
+    config['val_set_out_1'] = 'multiEnc_TEST/validation_out_1.txt'
     config['output_val_set'] = True
     config['beam_size'] = 2
 
     # Timing related
     config['reload'] = True
     config['save_freq'] = 1
-    config['sampling_freq'] = 1
-    config['bleu_val_freq'] = 10000
+    config['sampling_freq'] = 100
+    config['bleu_val_freq'] = 100
     config['val_burn_in'] = 0
 
     # Monitoring related
@@ -215,7 +218,7 @@ def get_config_wmt15_fide_en():
     config['trg_rep_dim'] = 200  # Annotation dim for trg_selector
     config['representation_dim'] = 2000  # this is the joint annotation
                                          # dimension of encoders
-    config['saveto'] = 'multiEnc_FIDE'
+    config['saveto'] = 'multiEnc_FIDE2'
 
     # Optimization related
     config['batch_size_enc_0'] = 80
@@ -224,7 +227,7 @@ def get_config_wmt15_fide_en():
     config['step_rule'] = 'AdaDelta'
     config['step_clipping'] = 5
     config['weight_scale'] = 0.01
-    config['schedule'] = [5, 5]
+    config['schedule'] = [24, 24]
 
     # Regularization related
     config['weight_noise_ff'] = False
@@ -251,9 +254,12 @@ def get_config_wmt15_fide_en():
     # Early stopping based on bleu related
     config['normalized_bleu'] = True
     config['bleu_script'] = '/data/lisatmp3/firatorh/turkishParallelCorpora/iwslt14/scripts/multi-bleu.perl'
-    config['val_set'] = '/data/lisatmp3/firatorh/nmt/wmt15/data/fi-en/dev/newsdev2015_TEST.tok.seg.fi'
-    config['val_set_grndtruth'] = '/data/lisatmp3/firatorh/nmt/wmt15/data/fi-en/dev/newsdev2015_TEST.tok.en'
-    config['val_set_out'] = 'multiEnc_TEST/validation_out.txt'
+    config['val_set_0'] = '/data/lisatmp3/firatorh/nmt/wmt15/data/fi-en/dev/newsdev2015_TEST.tok.seg.fi'
+    config['val_set_grndtruth_0'] = '/data/lisatmp3/firatorh/nmt/wmt15/data/fi-en/dev/newsdev2015_TEST.tok.en'
+    config['val_set_out_0'] = 'multiEnc_TEST/validation_out.txt'
+    config['val_set_1'] = '/data/lisatmp3/firatorh/nmt/wmt15/data/fi-en/dev/newsdev2015_TEST.tok.seg.fi'
+    config['val_set_grndtruth_1'] = '/data/lisatmp3/firatorh/nmt/wmt15/data/fi-en/dev/newsdev2015_TEST.tok.en'
+    config['val_set_out_1'] = 'multiEnc_TEST/validation_out.txt'
     config['output_val_set'] = True
     config['beam_size'] = 2
 

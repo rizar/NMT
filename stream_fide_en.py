@@ -140,7 +140,6 @@ class MultiEncStream(Transformer, six.Iterator):
         self.epoch_counter[idx] += 1
 
 
-
 # If you wrap following functions, main_loop cannot be pickled ****************
 def _length(sentence_pair):
     '''Assumes target is the last element in the tuple'''
@@ -210,4 +209,15 @@ for i in xrange(num_encs):
 
 multi_enc_stream = MultiEncStream(ind_streams, schedule=config['schedule'],
                                   batch_sizes=[config['batch_size_enc_%d' % i]
-                                              for i in xrange(num_encs)]  )
+                                               for i in xrange(num_encs)])
+
+# Development set streams *****************************************************
+# Setup development set stream if necessary
+dev_streams = []
+for i in xrange(config['num_encs']):
+    if 'val_set_%d' % i in config and config['val_set_%d' % i]:
+        dev_file = config['val_set_%d' % i]
+        dev_dataset = TextFile(
+                [dev_file], cPickle.load(open(src_vocabs[i])), None)
+        dev_streams.append(DataStream(dev_dataset))
+
