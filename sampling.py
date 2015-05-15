@@ -45,105 +45,15 @@ class SamplingBase(object):
         return " ".join([ivocab.get(idx, "<UNK>") for idx in seq])
 
 
-class MultiEncSampler(SimpleExtension, SamplingBase):
-
-    def __init__(self, model, data_stream, config, **kwargs):
-        super(MultiEncSampler, self).__init__(**kwargs)
-        self.model = model
-        self.data_stream = data_stream
-        self.config = config
-        self.num_encs = config['num_encs']
-        self.is_synced = False
-        self.sampling_fn = model.get_theano_function()
-
-    def do(self, which_callback, *args):
-
-        # Get vocabularies and current model parameters
-        if not self.is_synced:
-            self.src_vocabs, self.trg_vocabs,\
-                self.src_ivocabs, self.trg_ivocabs = self.get_vocabs()
-
-            self.model.params = self.main_loop.model.params
-            self.is_synced = True
-
-        # Get data, NOTE these are not peeked batches
-        batches = self.data_stream.get_batches_from_all_streams()
-        streams = self.main_loop.data_stream.streams
-        source_names = [streams[i].mask_sources[0]
-                        for i in xrange(self.num_encs)]
-
-        print ""
-        for ss in xrange(len(batches)):
-
-            batch = batches[ss]
-            sample_idx = numpy.random.choice(
-                    self.config['batch_size_enc_%d' % ss],
-                    self.config['hook_samples'], replace=False)
-
-            # TODO: reversed should be removed, check model.inputs
-            src_inputs = [batch[source_names[ii]][sample_idx, :]
-                          for ii in reversed(xrange(self.num_encs))]
-            trg_input = batch[streams[ss].mask_sources[1]][sample_idx, :]
-
-            src_selector = batch['src_selector']
-            trg_selector = batch['trg_selector']
-
-            inputs = src_inputs + [src_selector, trg_selector]
-
-            # Sample
-            _1, outputs, _2, _3, costs = (self.sampling_fn(*inputs))
-            outputs = outputs.T
-            costs = list(costs.T)
-
-            for i in range(len(outputs)):
-                input_length = self._get_true_length(
-                        src_inputs[ss][i], self.src_vocabs[ss])
-                target_length = self._get_true_length(
-                        trg_input[i], self.trg_vocabs[ss])
-                sample_length = self._get_true_length(
-                        outputs[i], self.trg_vocabs[ss])
-
-                print "Input %d: " % ss,\
-                      self._idx_to_word(
-                          src_inputs[ss][i][:input_length],
-                          self.src_ivocabs[ss])
-                print "Target: ",\
-                      self._idx_to_word(
-                          trg_input[i][:target_length], self.trg_ivocabs[ss])
-                print "Sample %d: " % ss,\
-                      self._idx_to_word(
-                          outputs[i][:sample_length], self.trg_ivocabs[ss])
-                print "Sample cost: ", costs[i][:sample_length].sum()
-                print ""
-
-    def get_vocabs(self):
-        src_vocabs, trg_vocabs, src_ivocabs, trg_ivocabs =\
-                [[] for _ in xrange(4)]
-
-        for ii in xrange(self.num_encs):
-            sources = self._get_attr_rec(
-                    self.data_stream.streams[ii], 'data_stream')
-            src_vocab = sources.data_streams[0].dataset.dictionary
-            trg_vocab = sources.data_streams[1].dataset.dictionary
-            src_ivocab = {v: k for k, v in src_vocab.items()}
-            trg_ivocab = {v: k for k, v in trg_vocab.items()}
-            src_vocabs.append(src_vocab)
-            trg_vocabs.append(trg_vocab)
-            src_ivocabs.append(src_ivocab)
-            trg_ivocabs.append(trg_ivocab)
-
-        return src_vocabs, trg_vocabs, src_ivocabs, trg_ivocabs
-
-
 class Sampler(SimpleExtension, SamplingBase):
 
-    def __init__(self, model, data_stream, config,
+    def __init__(self, model, data_stream, num_samples=1,
                  src_vocab=None, trg_vocab=None, src_ivocab=None,
                  trg_ivocab=None, **kwargs):
         super(Sampler, self).__init__(**kwargs)
         self.model = model
-        self.config = config
         self.data_stream = data_stream
+        self.num_samples = num_samples
         self.src_vocab = src_vocab
         self.trg_vocab = trg_vocab
         self.src_ivocab = src_ivocab
@@ -153,13 +63,31 @@ class Sampler(SimpleExtension, SamplingBase):
 
     def do(self, which_callback, *args):
 
-        # Get current model parameters
-        if not self.is_synced:
-            self.model.params = self.main_loop.model.params
-            self.is_synced = True
+        # Randomly select source samples from the current batch
+        # WARNING: Source and target indices from data stream
+        #  can be different
+        batch = args[0]
+        batch_size = batch['source'].shape[0]
 
         # Get dictionaries, this may not be the practical way
-        sources = self._get_attr_rec(self.main_loop, 'data_stream')
+        enc_id = 0
+        if 'src_selector' in batch:
+            enc_id = numpy.argmax(batch['src_selector'])
+            sources = self._get_attr_rec(
+                    self.main_loop.data_stream.streams[enc_id], 'data_stream')
+            model_params = self.main_loop.models[enc_id].params
+        else:
+            sources = self._get_attr_rec(self.main_loop, 'data_stream')
+            model_params = self.main_loop.model.params
+
+        # Get current model parameters
+        if not self.is_synced:
+            self.model.params = model_params
+            self.is_synced = True
+
+        # Get input names
+        src_name = sources.sources[0]
+        trg_name = sources.sources[1]
 
         # Load vocabularies and invert if necessary
         # WARNING: Source and target indices from data stream
@@ -173,24 +101,29 @@ class Sampler(SimpleExtension, SamplingBase):
         if not self.trg_ivocab:
             self.trg_ivocab = {v: k for k, v in self.trg_vocab.items()}
 
-        # Randomly select source samples from the current batch
-        # WARNING: Source and target indices from data stream
-        #  can be different
-        batch = args[0]
-
-        sample_idx = numpy.random.choice(self.config['batch_size'],
-                        self.config['hook_samples'], replace=False)
-        src_batch = batch[self.main_loop.data_stream.mask_sources[0]]
-        trg_batch = batch[self.main_loop.data_stream.mask_sources[1]]
+        sample_idx = numpy.random.choice(
+                batch_size, self.num_samples, replace=False)
+        src_batch = batch[src_name]
+        trg_batch = batch[trg_name]
 
         input_ = src_batch[sample_idx, :]
         target_ = trg_batch[sample_idx, :]
 
+        # Add inputs if selectors are specified
+        # TODO: ordering matters here, fix it properly
+        inputs = [input_]
+        if 'trg_selector' in batch:
+            inputs += [batch['trg_selector']]
+        if 'src_selector' in batch:
+            inputs += [batch['src_selector']]
+
         # Sample
-        _1, outputs, _2, _3, costs = (self.sampling_fn(input_))
+        _1, outputs, _2, _3, costs = (self.sampling_fn(*inputs))
         outputs = outputs.T
         costs = list(costs.T)
 
+        print ""
+        print "Sampling from computation graph[{}]".format(enc_id)
         for i in range(len(outputs)):
             input_length = self._get_true_length(input_[i], self.src_vocab)
             target_length = self._get_true_length(target_[i], self.trg_vocab)

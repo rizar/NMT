@@ -190,7 +190,7 @@ def get_config_wmt15_fide_en_TEST():
     # Timing related
     config['reload'] = True
     config['save_freq'] = 1
-    config['sampling_freq'] = 100
+    config['sampling_freq'] = 1
     config['bleu_val_freq'] = 100
     config['val_burn_in'] = 0
 

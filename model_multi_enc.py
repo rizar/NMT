@@ -26,8 +26,9 @@ from blocks.main_loop import (MainLoop, TrainingFinish,
 from blocks.model import Model
 from blocks.graph import ComputationGraph
 from blocks.initialization import IsotropicGaussian, Orthogonal, Constant
-from blocks.extensions import Printing
-from blocks.extensions.monitoring import TrainingDataMonitoring
+from blocks.extensions import Printing, SimpleExtension
+from blocks.extensions.monitoring import MonitoringExtension
+from blocks.monitoring.evaluators import AggregationBuffer
 from blocks.extensions.plot import Plot
 from blocks.extensions.saveload import LoadFromDump, Dump
 
@@ -48,12 +49,12 @@ from blocks.bricks.sequence_generators import (
 )
 from blocks.utils import (dict_union, dict_subset, shared_floatx_nans,
                           change_recursion_limit, reraise_as)
-from blocks.utils.profile import Profile, Timer
+from blocks.utils.profile import Timer
 
 import config
 import stream_fide_en
 
-from sampling import MultiEncSampler, MultiEncBleuValidator
+from sampling import Sampler, MultiEncBleuValidator
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +72,20 @@ config = getattr(config, args.proto)()
 streams = {'fide-en': stream_fide_en}
 
 
-class TrainingDataMonitoringWithMultiCG(TrainingDataMonitoring):
+class TrainingDataMonitoringWithMultiCG(SimpleExtension, MonitoringExtension):
+
+    def __init__(self, variables, **kwargs):
+        """Variables should be a list of list
+        """
+        num_cgs = len(variables)
+        kwargs.setdefault("before_training", True)
+        super(TrainingDataMonitoringWithMultiCG, self).__init__(**kwargs)
+        self._buffers = []
+        for i in xrange(num_cgs):
+            self._buffers.append(
+                    AggregationBuffer([variables[i]], use_take_last=True))
+        self._last_time_called = -1
+
     def do(self, callback_name, *args):
         if callback_name == 'before_training':
             for i in xrange(self.main_loop.num_cgs):
@@ -79,17 +93,19 @@ class TrainingDataMonitoringWithMultiCG(TrainingDataMonitoring):
                                   DifferentiableCostMinimizer):
                     raise ValueError
                 self.main_loop.algorithm.algorithms[i].add_updates(
-                    self._buffer.accumulation_updates)
-            self._buffer.initialize_aggregators()
+                    self._buffers[i].accumulation_updates)
+                self._buffers[i].initialize_aggregators()
         else:
             if (self.main_loop.status['iterations_done'] ==
                     self._last_time_called):
                 raise Exception("TrainingDataMonitoring.do should be invoked"
                                 " no more than once per iteration")
             self._last_time_called = self.main_loop.status['iterations_done']
-            self.add_records(self.main_loop.log,
-                             self._buffer.get_aggregated_values().items())
-            self._buffer.initialize_aggregators()
+            enc_id = numpy.argmax(args[0]['src_selector'])
+            self.add_records(
+                    self.main_loop.log,
+                    self._buffers[enc_id].get_aggregated_values().items())
+            self._buffers[enc_id].initialize_aggregators()
 
 
 class MainLoopWithMultiCG(MainLoop):
@@ -97,6 +113,7 @@ class MainLoopWithMultiCG(MainLoop):
     def __init__(self, models, **kwargs):
         self.models = models
         self.num_cgs = len(models)
+        # TODO: fix this
         kwargs['model'] = models[0]
         super(MainLoopWithMultiCG, self).__init__(**kwargs)
 
@@ -221,14 +238,25 @@ class MainLoopDumpManagerWMT15(MainLoopDumpManager):
         for each step separately.
         """
         try:
-            # TODO: load respectively
-            import ipdb;ipdb.set_trace()
             logger.info("Loading model parameters...")
-            params = self.load_parameters()
-            main_loop.model.set_param_values(params)
-            for p, v in params.iteritems():
-                logger.info("Loaded {:15}: {}".format(v.shape, p))
-            logger.info("Number of parameters loaded: {}".format(len(params)))
+            params_all = self.load_parameters()
+            for i in xrange(main_loop.num_cgs):
+                params_this = main_loop.models[i].get_params()
+                missing = set(params_this) - set(params_all)
+                for pname in params_this.keys():
+                    if pname in params_all:
+                        val = params_all[pname]
+                        params_this[pname].set_value(val)
+                        logger.info("Loaded to CG[{}] {:15}: {}"
+                                    .format(i, val.shape, pname))
+                    else:
+                        logger.error(
+                           "Error loading {}, parameter does not exist"
+                           .format(pname))
+
+                logger.info(
+                    "Number of parameters loaded for computation graph[{}]: {}"
+                    .format(i, len(params_this) - len(missing)))
         except Exception as e:
             logger.error("Error {0}".format(str(e)))
 
@@ -918,23 +946,12 @@ class Decoder(Initializable):
         return (cost * target_sentence_mask).sum() / target_sentence_mask.shape[1]
 
     @application
-    def generate(self, source_sentences, representation,
-                 src_selector, trg_selector,
+    def generate(self, source_sentence, representation,
                  src_selector_rep, trg_selector_rep):
-        n_steps = ifelse(
-                theano.tensor.eq(src_selector[0], 1.),
-                source_sentences[0].shape[1],
-                source_sentences[1].shape[1])
 
-        batch_size = ifelse(
-                theano.tensor.eq(src_selector[0], 1.),
-                source_sentences[0].shape[0],
-                source_sentences[1].shape[0])
-
-        attended_mask = ifelse(
-                theano.tensor.eq(src_selector[0], 1.),
-                tensor.ones(source_sentences[0].shape).T,
-                tensor.ones(source_sentences[1].shape).T)
+        n_steps = source_sentence.shape[1]
+        batch_size = source_sentence.shape[0]
+        attended_mask = tensor.ones(source_sentence.shape).T
 
         return self.sequence_generator.generate(
             n_steps=2 * n_steps,
@@ -1042,24 +1059,6 @@ def main(config, tr_stream, dev_streams):
                                  eval(config['step_rule'])()])
     )
 
-    """
-    # Set up beam search and sampling computation graphs
-    sampling_rep,\
-        src_selector_rep, trg_selector_rep =\
-        multi_encoder.apply(sampling_input, sampling_mask,
-                            sampling_src_sel, sampling_trg_sel)
-
-    generated = decoder.generate(sampling_inputs, sampling_rep,
-                                 sampling_src_sel, sampling_trg_sel,
-                                 src_selector_rep, trg_selector_rep)
-    samples, = VariableFilter(
-        bricks=[decoder.sequence_generator], name="outputs")(
-            ComputationGraph(generated[1]))  # generated[1] is the next_outputs
-
-    # Set up sampling model
-    search_model = Model(generated)
-    """
-
     # Set up training model
     training_models = []
     for i in xrange(config['num_encs']):
@@ -1067,25 +1066,38 @@ def main(config, tr_stream, dev_streams):
 
     # Set extensions
     extensions = [
+        TrainingDataMonitoringWithMultiCG([costs[0], costs[1]], after_batch=True),
         Printing(after_batch=True),
-        #TrainingDataMonitoringWithMultiCG(costs, after_batch=True),
         stream_fide_en.PrintMultiStream(after_batch=True),
-        #Plot('FiDe-En', channels=[['decoder_cost_cost']],
-        #     after_batch=True),
+        Plot('FiDe-En',
+             channels=[['decoder_cost_cost_0'], ['decoder_cost_cost_1']],
+             after_batch=True),
         DumpWithMultiCG(state_path=config['saveto'],
                         every_n_batches=config['save_freq'])
     ]
+
+    # Set up beam search and sampling computation graphs
+    for i in xrange(config['num_encs']):
+        sampling_rep, src_selector_rep, trg_selector_rep =\
+            multi_encoder.apply(sampling_input, sampling_mask,
+                                sampling_src_sel, sampling_trg_sel, i)
+
+        generated = decoder.generate(sampling_input, sampling_rep,
+                                     src_selector_rep, trg_selector_rep)
+        samples, = VariableFilter(
+            bricks=[decoder.sequence_generator], name="outputs")(
+                ComputationGraph(generated[1]))  # generated[1] is the next_outputs
+
+        # Add sampling for multi encoder
+        extensions.append(Sampler(
+            Model(generated), tr_stream, num_samples=config['hook_samples'],
+            every_n_batches=config['sampling_freq']))
 
     # Reload model if necessary
     if config['reload']:
         extensions.append(LoadFromDumpMultiCG(config['saveto']))
 
     """
-    # Add sampling for multi encoder
-    extensions.append(MultiEncSampler(
-        search_model, tr_stream, config,
-        every_n_batches=config['sampling_freq']))
-
     # Add bleu validator for multi encoder
     extensions.append(MultiEncBleuValidator(
         sampling_inputs, samples, search_model, dev_streams, config,
