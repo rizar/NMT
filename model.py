@@ -11,7 +11,7 @@ from toolz import merge
 from picklable_itertools.extras import equizip
 
 from blocks.algorithms import (GradientDescent, StepClipping, AdaDelta,
-                               CompositeRule)
+                               CompositeRule, RemoveNotFinite)
 from blocks.dump import MainLoopDumpManager
 from blocks.filter import VariableFilter
 from blocks.main_loop import MainLoop
@@ -340,6 +340,7 @@ def main(config, tr_stream, dev_stream):
     algorithm = GradientDescent(
         cost=cost, params=cg.parameters,
         step_rule=CompositeRule([StepClipping(config['step_clipping']),
+                                 RemoveNotFinite(0.9),
                                  eval(config['step_rule'])()])
     )
 
