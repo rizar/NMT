@@ -88,7 +88,7 @@ class Sampler(SimpleExtension, SamplingBase):
         #  can be different
         batch = args[0]
 
-        sample_idx = numpy.random.choice(self.config['batch_size'],
+        sample_idx = numpy.random.choice(batch['source'].shape[0],
                         self.config['hook_samples'], replace=False)
         src_batch = batch[self.main_loop.data_stream.mask_sources[0]]
         trg_batch = batch[self.main_loop.data_stream.mask_sources[1]]
