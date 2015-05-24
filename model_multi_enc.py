@@ -3,21 +3,23 @@
 # 0e23b0193f64dc3e56da18605d53d6f5b1352848
 import argparse
 import numpy
+import os
 import logging
 import pprint
+import re
 import signal
 import theano
 import traceback
-from collections import Counter
+from collections import Counter, OrderedDict
 from theano import tensor
-from theano.ifelse import ifelse
 from toolz import merge
 from picklable_itertools.extras import equizip
 
 from blocks import config as cfg
 from blocks.algorithms import (GradientDescent, StepClipping, AdaDelta,
                                CompositeRule, variable_mismatch_error,
-                               DifferentiableCostMinimizer)
+                               DifferentiableCostMinimizer, RemoveNotFinite,
+                               StepRule)
 from blocks.dump import MainLoopDumpManager, save_parameter_values
 from blocks.filter import VariableFilter
 from blocks.main_loop import (MainLoop, TrainingFinish,
@@ -47,14 +49,15 @@ from blocks.bricks.sequence_generators import (
     LookupFeedback, Readout, SoftmaxEmitter,
     BaseSequenceGenerator
 )
+from blocks.theano_expressions import l2_norm
 from blocks.utils import (dict_union, dict_subset, shared_floatx_nans,
-                          change_recursion_limit, reraise_as)
+                          change_recursion_limit, reraise_as, shared_floatx)
 from blocks.utils.profile import Timer
 
 import config
-import stream_fide_en
+import multi_stream
 
-from sampling import Sampler, MultiEncBleuValidator
+from sampling import Sampler, BleuValidator
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +72,52 @@ args = parser.parse_args()
 config = getattr(config, args.proto)()
 
 # dictionary mapping stream name to stream getters
-streams = {'fide-en': stream_fide_en}
+streams = {'fide-en': multi_stream,
+           'fideen-en': multi_stream}
+
+
+class IncrementalDump(SimpleExtension):
+
+    def __init__(self, saveto, **kwargs):
+        super(IncrementalDump, self).__init__(**kwargs)
+        self.saveto = saveto
+        self.modelID = self._get_model_id(saveto)
+
+    def _get_model_id(self, saveto):
+        try:
+            postfix = [int(m.group(1))
+                       for m in [re.match(r'.*_([-0-9]+)', f)
+                                 for f in os.listdir(saveto)]
+                       if m is not None]
+            model_id = max(postfix)
+        except:
+            model_id = 0
+        return model_id
+
+    def do(self, which_callback, *args):
+        import ipdb;ipdb.set_trace()
+        pass
+
+
+class StepClippingWithRemoveNotFinite(StepRule):
+
+    def __init__(self, threshold=None, scale=0.1):
+        if threshold:
+            self.threshold = shared_floatx(threshold)
+        self.scale = scale
+
+    def compute_steps(self, previous_steps):
+        if not hasattr(self, 'threshold'):
+            return previous_steps
+        norm = l2_norm(previous_steps.values())
+        multiplier = tensor.switch(tensor.ge(norm, self.threshold),
+                                   self.threshold / norm, 1)
+        notfinite = tensor.or_(tensor.isnan(norm), tensor.isinf(norm))
+        steps = OrderedDict(
+            (param, tensor.switch(
+                notfinite, param * self.scale, step * multiplier))
+            for param, step in previous_steps.items())
+        return steps, []
 
 
 class TrainingDataMonitoringWithMultiCG(SimpleExtension, MonitoringExtension):
@@ -424,9 +472,9 @@ class BidirectionalEncoder(Initializable):
                  outputs=['representation'])
     def apply(self, source_sentence, source_sentence_mask):
         # Time as first dimension
+        #source_sentence = theano.printing.Print("Encoder{}:source sentence".format(self.enc_id), ['shape'])(source_sentence)
         source_sentence = source_sentence.T
         source_sentence_mask = source_sentence_mask.T
-        source_sentence = theano.printing.Print("Encoder{}:source sentence".format(self.enc_id), ['shape'])(source_sentence)
         embeddings = self.lookup.apply(source_sentence)
 
         representation = self.bidir.apply(
@@ -1055,9 +1103,9 @@ def main(config, tr_stream, dev_streams):
     # Set up training algorithm
     algorithm = GradientDescentWithMultiCG(
         costs=costs, params=[cgs[i].parameters for i in xrange(len(cgs))],
-        step_rule=CompositeRule([StepClipping(config['step_clipping']),
-                                 eval(config['step_rule'])()])
-    )
+        step_rule=CompositeRule([StepClippingWithRemoveNotFinite(
+                                    threshold=config['step_clipping']),
+                                 eval(config['step_rule'])()]))
 
     # Set up training model
     training_models = []
@@ -1066,51 +1114,69 @@ def main(config, tr_stream, dev_streams):
 
     # Set extensions
     extensions = [
-        TrainingDataMonitoringWithMultiCG([costs[0], costs[1]], after_batch=True),
+        TrainingDataMonitoringWithMultiCG(costs, after_batch=True),
         Printing(after_batch=True),
-        stream_fide_en.PrintMultiStream(after_batch=True),
-        Plot('FiDe-En',
-             channels=[['decoder_cost_cost_0'], ['decoder_cost_cost_1']],
-             after_batch=True),
+        multi_stream.PrintMultiStream(after_batch=True),
         DumpWithMultiCG(state_path=config['saveto'],
-                        every_n_batches=config['save_freq'])
-    ]
+                        every_n_batches=config['save_freq'])]
 
     # Set up beam search and sampling computation graphs
     for i in xrange(config['num_encs']):
+
+        # Compute annotations from one of the encoders
         sampling_rep, src_selector_rep, trg_selector_rep =\
             multi_encoder.apply(sampling_input, sampling_mask,
                                 sampling_src_sel, sampling_trg_sel, i)
 
+        # Get sampling computation graph
         generated = decoder.generate(sampling_input, sampling_rep,
                                      src_selector_rep, trg_selector_rep)
+
+        # Filter the output variable that corresponds to the sample
         samples, = VariableFilter(
             bricks=[decoder.sequence_generator], name="outputs")(
                 ComputationGraph(generated[1]))  # generated[1] is the next_outputs
 
+        # Create a model for the computation graph
+        sampling_model = Model(generated)
+
         # Add sampling for multi encoder
         extensions.append(Sampler(
-            Model(generated), tr_stream, num_samples=config['hook_samples'],
-            every_n_batches=config['sampling_freq']))
+            sampling_model, tr_stream, num_samples=config['hook_samples'],
+            enc_id=i, every_n_batches=config['sampling_freq']))
+
+        # Add bleu validator for multi encoder, except for the identical
+        # mapping languages such as english-to-english computation graph
+        if config['src_data_%d' % i] != config['trg_data_%d' % i]:
+            extensions.append(BleuValidator(
+                sampling_input, samples, sampling_model, dev_streams[i],
+                src_selector=sampling_src_sel, trg_selector=sampling_trg_sel,
+                src_vocab_size=config['src_vocab_size_%d' % i],
+                bleu_script=config['bleu_script'],
+                val_set_out=config['val_set_out_%d' % i],
+                val_set_grndtruth=config['val_set_grndtruth_%d' % i],
+                beam_size=config['beam_size'], val_burn_in=config['val_burn_in'],
+                enc_id=i, saveto=config['saveto'],
+                every_n_batches=config['bleu_val_freq']))
 
     # Reload model if necessary
     if config['reload']:
         extensions.append(LoadFromDumpMultiCG(config['saveto']))
 
-    """
-    # Add bleu validator for multi encoder
-    extensions.append(MultiEncBleuValidator(
-        sampling_inputs, samples, search_model, dev_streams, config,
-        every_n_batches=config['bleu_val_freq']))
-    """
+    if config['plot']:
+        extensions.append(
+            Plot(config['stream'],
+                 channels=[['decoder_cost_cost_%d' % i]
+                           for i in xrange(config['num_encs'])],
+                 server_url="http://127.0.0.1:{}".format(config['bokeh_port']),
+                 after_batch=True))
 
     # Initialize main loop
     main_loop = MainLoopWithMultiCG(
         models=training_models,
         algorithm=algorithm,
         data_stream=tr_stream,
-        extensions=extensions
-    )
+        extensions=extensions)
 
     # Train!
     main_loop.run()
