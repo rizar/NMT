@@ -358,7 +358,7 @@ def get_config_wmt15_fideen_en():
     config['reload'] = True
     config['save_freq'] = 1000
     config['sampling_freq'] = 13
-    config['bleu_val_freq'] = 1000
+    config['bleu_val_freq'] = 5000
     config['val_burn_in'] = 40000
 
     # Monitoring related
