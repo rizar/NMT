@@ -140,8 +140,7 @@ class BleuValidator(SimpleExtension, SamplingBase):
         self.eos_idx = self.vocab[self.eos_sym]
         self.best_models = []
         self.val_bleu_curve = []
-        self.beam_search = BeamSearch(source_sentence,
-                                      beam_size=self.config['beam_size'],
+        self.beam_search = BeamSearch(beam_size=self.config['beam_size'],
                                       samples=samples)
         self.multibleu_cmd = ['perl', self.config['bleu_script'],
                               self.config['val_set_grndtruth'], '<']

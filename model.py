@@ -157,11 +157,11 @@ class BidirectionalEncoder(Initializable):
         self.lookup.dim = self.embedding_dim
 
         self.fwd_fork.input_dim = self.embedding_dim
-        self.fwd_fork.output_dims = [self.state_dim
-                                 for _ in self.fwd_fork.output_names]
+        self.fwd_fork.output_dims = [self.bidir.children[0].get_dim(name)
+                                 for name in self.fwd_fork.output_names]
         self.back_fork.input_dim = self.embedding_dim
-        self.back_fork.output_dims = [self.state_dim
-                                 for _ in self.back_fork.output_names]
+        self.back_fork.output_dims = [self.bidir.children[1].get_dim(name)
+                                 for name in self.back_fork.output_names]
 
     @application(inputs=['source_sentence', 'source_sentence_mask'],
                  outputs=['representation'])
@@ -197,10 +197,7 @@ class GRUInitialState(GatedRecurrent):
             initial_state = self.initial_transformer.apply(
                 attended[0, :, -self.attended_dim:])
             return initial_state
-        dim = self.get_dim(state_name)
-        if dim == 0:
-            return tensor.zeros((batch_size,))
-        return tensor.zeros((batch_size, dim))
+        return super(GRUInitialState, self).initial_state(state_name, batch_size, *args, **kwargs)
 
 
 class Decoder(Initializable):
