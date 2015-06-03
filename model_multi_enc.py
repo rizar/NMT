@@ -63,6 +63,45 @@ streams = {'fide-en': multi_stream,
            'fideen-en': multi_stream}
 
 
+class MainLoopDumpManagerWMT15(MainLoopDumpManager):
+
+    def load_to(self, main_loop):
+        """Loads the dump from the root folder into the main loop.
+
+        Only difference from super().load_to is the exception handling
+        for each step separately.
+        """
+        try:
+            logger.info("Loading model parameters...")
+            params = self.load_parameters()
+            main_loop.model.set_param_values(params)
+            for p, v in params.iteritems():
+                logger.info("Loaded {:15}: {}".format(v.shape, p))
+            logger.info("Number of parameters loaded: {}".format(len(params)))
+        except Exception as e:
+            logger.error("Error {0}".format(str(e)))
+
+        try:
+            logger.info("Loading iteration state...")
+            main_loop.iteration_state = self.load_iteration_state()
+        except Exception as e:
+            logger.error("Error {0}".format(str(e)))
+
+        try:
+            logger.info("Loading log...")
+            main_loop.log = self.load_log()
+        except Exception as e:
+            logger.error("Error {0}".format(str(e)))
+
+
+class LoadFromDumpWMT15(LoadFromDump):
+    """Wrapper to use MainLoopDumpManagerWMT15"""
+
+    def __init__(self, config_path, **kwargs):
+        super(LoadFromDumpWMT15, self).__init__(config_path, **kwargs)
+        self.manager = MainLoopDumpManagerWMT15(config_path)
+
+
 # Helper class
 class InitializableFeedforwardSequence(FeedforwardSequence, Initializable):
     pass
@@ -920,6 +959,10 @@ def main(config, tr_stream, dev_streams):
                            for i in xrange(config['num_encs'])],
                  server_url="http://127.0.0.1:{}".format(config['bokeh_port']),
                  after_batch=True))
+
+    # Reload model if necessary
+    if config['reload']:
+        extensions += [LoadFromDumpWMT15(config['saveto'])]
 
     # Initialize main loop
     main_loop = MainLoopWithMultiCG(
