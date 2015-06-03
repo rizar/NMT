@@ -2,40 +2,24 @@
 # Works with https://github.com/orhanf/blocks/tree/wmt15
 # 0e23b0193f64dc3e56da18605d53d6f5b1352848
 import argparse
-import numpy
-import os
 import logging
 import pprint
-import re
-import signal
 import theano
-import traceback
-from collections import Counter, OrderedDict
+from collections import Counter
 from theano import tensor
 from toolz import merge
 from picklable_itertools.extras import equizip
 
-from blocks import config as cfg
-from blocks.algorithms import (GradientDescent, StepClipping, AdaDelta,
-                               CompositeRule, variable_mismatch_error,
-                               DifferentiableCostMinimizer, RemoveNotFinite,
-                               StepRule)
-from blocks.dump import MainLoopDumpManager, save_parameter_values
+from blocks.algorithms import (AdaDelta, CompositeRule, Adam)
 from blocks.filter import VariableFilter
-from blocks.main_loop import (MainLoop, TrainingFinish,
-                              error_in_error_handling_message,
-                              error_message)
 from blocks.model import Model
 from blocks.graph import ComputationGraph
 from blocks.initialization import IsotropicGaussian, Orthogonal, Constant
-from blocks.extensions import Printing, SimpleExtension
-from blocks.extensions.monitoring import MonitoringExtension
-from blocks.monitoring.evaluators import AggregationBuffer
+from blocks.extensions import Printing
 from blocks.extensions.plot import Plot
-from blocks.extensions.saveload import LoadFromDump, Dump
 
 from blocks.bricks import (Tanh, Maxout, Linear, FeedforwardSequence,
-                           Bias, Initializable, MLP, Sigmoid)
+                           Bias, Initializable, MLP, Sigmoid, Identity)
 from blocks.bricks.attention import (ShallowEnergyComputer,
                                      AbstractAttentionRecurrent,
                                      GenericSequenceAttention)
@@ -49,14 +33,17 @@ from blocks.bricks.sequence_generators import (
     LookupFeedback, Readout, SoftmaxEmitter,
     BaseSequenceGenerator
 )
-from blocks.theano_expressions import l2_norm
-from blocks.utils import (dict_union, dict_subset, shared_floatx_nans,
-                          change_recursion_limit, reraise_as, shared_floatx)
-from blocks.utils.profile import Timer
+from blocks.utils import (dict_union, dict_subset, shared_floatx_nans)
 
 import config
 import multi_stream
 
+from multiCG_algorithm import (GradientDescentWithMultiCG,
+                               StepClippingWithRemoveNotFinite,
+                               MainLoopWithMultiCG)
+from multiCG_extensions import (TrainingDataMonitoringWithMultiCG,
+                                DumpWithMultiCG,
+                                LoadFromDumpMultiCG)
 from sampling import Sampler, BleuValidator
 
 logger = logging.getLogger(__name__)
@@ -76,275 +63,6 @@ streams = {'fide-en': multi_stream,
            'fideen-en': multi_stream}
 
 
-class IncrementalDump(SimpleExtension):
-
-    def __init__(self, saveto, **kwargs):
-        super(IncrementalDump, self).__init__(**kwargs)
-        self.saveto = saveto
-        self.modelID = self._get_model_id(saveto)
-
-    def _get_model_id(self, saveto):
-        try:
-            postfix = [int(m.group(1))
-                       for m in [re.match(r'.*_([-0-9]+)', f)
-                                 for f in os.listdir(saveto)]
-                       if m is not None]
-            model_id = max(postfix)
-        except:
-            model_id = 0
-        return model_id
-
-    def do(self, which_callback, *args):
-        import ipdb;ipdb.set_trace()
-        pass
-
-
-class StepClippingWithRemoveNotFinite(StepRule):
-
-    def __init__(self, threshold=None, scale=0.1):
-        if threshold:
-            self.threshold = shared_floatx(threshold)
-        self.scale = scale
-
-    def compute_steps(self, previous_steps):
-        if not hasattr(self, 'threshold'):
-            return previous_steps
-        norm = l2_norm(previous_steps.values())
-        multiplier = tensor.switch(tensor.ge(norm, self.threshold),
-                                   self.threshold / norm, 1)
-        notfinite = tensor.or_(tensor.isnan(norm), tensor.isinf(norm))
-        steps = OrderedDict(
-            (param, tensor.switch(
-                notfinite, param * self.scale, step * multiplier))
-            for param, step in previous_steps.items())
-        return steps, []
-
-
-class TrainingDataMonitoringWithMultiCG(SimpleExtension, MonitoringExtension):
-
-    def __init__(self, variables, **kwargs):
-        """Variables should be a list of list
-        """
-        num_cgs = len(variables)
-        kwargs.setdefault("before_training", True)
-        super(TrainingDataMonitoringWithMultiCG, self).__init__(**kwargs)
-        self._buffers = []
-        for i in xrange(num_cgs):
-            self._buffers.append(
-                    AggregationBuffer([variables[i]], use_take_last=True))
-        self._last_time_called = -1
-
-    def do(self, callback_name, *args):
-        if callback_name == 'before_training':
-            for i in xrange(self.main_loop.num_cgs):
-                if not isinstance(self.main_loop.algorithm.algorithms[i],
-                                  DifferentiableCostMinimizer):
-                    raise ValueError
-                self.main_loop.algorithm.algorithms[i].add_updates(
-                    self._buffers[i].accumulation_updates)
-                self._buffers[i].initialize_aggregators()
-        else:
-            if (self.main_loop.status['iterations_done'] ==
-                    self._last_time_called):
-                raise Exception("TrainingDataMonitoring.do should be invoked"
-                                " no more than once per iteration")
-            self._last_time_called = self.main_loop.status['iterations_done']
-            enc_id = numpy.argmax(args[0]['src_selector'])
-            self.add_records(
-                    self.main_loop.log,
-                    self._buffers[enc_id].get_aggregated_values().items())
-            self._buffers[enc_id].initialize_aggregators()
-
-
-class MainLoopWithMultiCG(MainLoop):
-
-    def __init__(self, models, **kwargs):
-        self.models = models
-        self.num_cgs = len(models)
-        # TODO: fix this
-        kwargs['model'] = models[0]
-        super(MainLoopWithMultiCG, self).__init__(**kwargs)
-
-    def run(self):
-        logging.basicConfig()
-
-        for i in xrange(self.num_cgs):
-            if self.models[i] and isinstance(self.algorithm.algorithms[i],
-                                             DifferentiableCostMinimizer):
-                if not self.models[i].get_objective() ==\
-                        self.algorithm.algorithms[i].cost:
-                    logger.warning(
-                            "different costs for model {} and algorithm {}"
-                            .format(i, i))
-                if not (set(self.models[i].get_params().values()) ==
-                        set(self.algorithm.algorithms[i].params)):
-                    logger.warning(
-                        "different params for model {} and algorithm {}"
-                        .format(i, i))
-
-        with change_recursion_limit(cfg.recursion_limit):
-            self.original_sigint_handler = signal.signal(
-                signal.SIGINT, self._handle_epoch_interrupt)
-            self.original_sigterm_handler = signal.signal(
-                signal.SIGTERM, self._handle_batch_interrupt)
-            try:
-                logger.info("Entered the main loop")
-                if not self.status['training_started']:
-                    for extension in self.extensions:
-                        extension.main_loop = self
-                    self._run_extensions('before_training')
-                    with Timer('initialization', self.profile):
-                        self.algorithm.initialize()
-                    self.status['training_started'] = True
-                if self.log.status['iterations_done'] > 0:
-                    self._run_extensions('on_resumption')
-                    self.status['epoch_interrupt_received'] = False
-                    self.status['batch_interrupt_received'] = False
-                with Timer('training', self.profile):
-                    while self._run_epoch():
-                        pass
-            except TrainingFinish:
-                self.log.current_row['training_finished'] = True
-            except Exception as e:
-                self._restore_signal_handlers()
-                self.log.current_row['got_exception'] = traceback.format_exc(e)
-                logger.error("Error occured during training." + error_message)
-                try:
-                    self._run_extensions('on_error')
-                except Exception as inner_e:
-                    logger.error(traceback.format_exc(inner_e))
-                    logger.error("Error occured when running extensions." +
-                                 error_in_error_handling_message)
-                reraise_as(e)
-            finally:
-                if self.log.current_row.get('training_finished', False):
-                    self._run_extensions('after_training')
-                if cfg.profile:
-                    self.profile.report()
-                self._restore_signal_handlers()
-
-
-class GradientDescentWithMultiCG(object):
-
-    def __init__(self, costs, params, step_rule, **kwargs):
-        self.num_cgs = len(costs)
-        self.algorithms = []
-        self._functions = []
-
-        for i in xrange(len(costs)):
-            self.algorithms.append(
-                    GradientDescent(
-                        cost=costs[i], params=params[i],
-                        step_rule=CompositeRule(
-                                [StepClipping(config['step_clipping']),
-                                 step_rule])))
-
-    def initialize(self):
-
-        # Check if both computation graphs have identical inputs
-        inputs = set.intersection(
-                *[set(self.algorithms[i].inputs)
-                    for i in xrange(self.num_cgs)])
-        if not all(
-                [set(self.algorithms[i].inputs) == inputs
-                    for i in xrange(self.num_cgs)]):
-            raise ValueError(
-                    "mismatch of input names between computation graphs")
-
-        for i in xrange(self.num_cgs):
-            logger.info("Initializing the training algorithm {}".format(i))
-            all_updates = self.algorithms[i].updates
-            for param in self.algorithms[i].params:
-                all_updates.append(
-                        (param, param - self.algorithms[i].steps[param]))
-            all_updates += self.algorithms[i].step_rule_updates
-            self._functions.append(theano.function(
-                    self.algorithms[i].inputs, [], updates=all_updates))
-            logger.info("The training algorithm {} is initialized".format(i))
-
-    def process_batch(self, batch):
-        for i in xrange(self.num_cgs):
-            if not set(batch.keys()) == set(
-                    [v.name for v in self.algorithms[i].inputs]):
-                raise ValueError(
-                        "mismatch of variable names and data sources" +
-                        variable_mismatch_error.format(
-                            sources=batch.keys(),
-                            variables=[v.name for v in
-                                       self.algorithms[i].inputs]))
-        cg_id = numpy.argmax(batch['src_selector'])
-        ordered_batch = [batch[v.name] for v in self.algorithms[cg_id].inputs]
-        self._functions[cg_id](*ordered_batch)
-
-
-class MainLoopDumpManagerWMT15(MainLoopDumpManager):
-
-    def load_to(self, main_loop):
-        """Loads the dump from the root folder into the main loop.
-
-        Only difference from super().load_to is the exception handling
-        for each step separately.
-        """
-        try:
-            logger.info("Loading model parameters...")
-            params_all = self.load_parameters()
-            for i in xrange(main_loop.num_cgs):
-                params_this = main_loop.models[i].get_params()
-                missing = set(params_this) - set(params_all)
-                for pname in params_this.keys():
-                    if pname in params_all:
-                        val = params_all[pname]
-                        params_this[pname].set_value(val)
-                        logger.info("Loaded to CG[{}] {:15}: {}"
-                                    .format(i, val.shape, pname))
-                    else:
-                        logger.error(
-                           "Error loading {}, parameter does not exist"
-                           .format(pname))
-
-                logger.info(
-                    "Number of parameters loaded for computation graph[{}]: {}"
-                    .format(i, len(params_this) - len(missing)))
-        except Exception as e:
-            logger.error("Error {0}".format(str(e)))
-
-        try:
-            logger.info("Loading iteration state...")
-            main_loop.iteration_state = self.load_iteration_state()
-        except Exception as e:
-            logger.error("Error {0}".format(str(e)))
-
-        try:
-            logger.info("Loading log...")
-            main_loop.log = self.load_log()
-        except Exception as e:
-            logger.error("Error {0}".format(str(e)))
-
-    def dump_parameters(self, main_loop):
-        params_to_save = []
-        for i in xrange(main_loop.num_cgs):
-            params_to_save.append(
-                    main_loop.models[i].get_param_values())
-        save_parameter_values(merge(params_to_save),
-                              self.path_to_parameters)
-
-
-class DumpWithMultiCG(Dump):
-    """Wrapper to use MainLoopDumpManagerWMT15"""
-    def __init__(self, state_path, **kwargs):
-        kwargs.setdefault("after_training", True)
-        super(DumpWithMultiCG, self).__init__(state_path, **kwargs)
-        self.manager = MainLoopDumpManagerWMT15(state_path)
-
-
-class LoadFromDumpMultiCG(LoadFromDump):
-    """Wrapper to use MainLoopDumpManagerWMT15"""
-
-    def __init__(self, config_path, **kwargs):
-        super(LoadFromDumpMultiCG, self).__init__(config_path, **kwargs)
-        self.manager = MainLoopDumpManagerWMT15(config_path)
-
-
 # Helper class
 class InitializableFeedforwardSequence(FeedforwardSequence, Initializable):
     pass
@@ -352,34 +70,31 @@ class InitializableFeedforwardSequence(FeedforwardSequence, Initializable):
 
 class MultiEncoder(Initializable):
 
-    def __init__(self, config, **kwargs):
+    def __init__(self, num_encs, num_decs, src_vocab_sizes, enc_embed_sizes,
+                 enc_nhids, representation_dim, **kwargs):
         super(MultiEncoder, self).__init__(**kwargs)
 
-        self.num_encs = config['num_encs']
+        self.num_encs = num_encs
         self.encoders = []
         for i in xrange(self.num_encs):
             self.encoders.append(
                 BidirectionalEncoder(
-                    config['src_vocab_size_%d' % i],
-                    config['enc_embed_%d' % i],
-                    config['enc_nhids_%d' % i],
+                    src_vocab_sizes[i],
+                    enc_embed_sizes[i],
+                    enc_nhids[i],
                     enc_id=i))
 
         # this is the embedding from h to z
-        self.annotation_embedders = [Linear(input_dim=(2 * config['enc_nhids_%d' % i]),
-                                            output_dim=config['representation_dim'],
+        self.annotation_embedders = [Linear(input_dim=(2 * enc_nhids[i]),
+                                            output_dim=representation_dim,
                                             name='annotation_embedder_%d' % i,
                                             use_bias=False)
                                      for i in xrange(self.num_encs)]
-        self.src_selector_embedder = Linear(input_dim=config['num_encs'],
-                                            output_dim=config['src_rep_dim'],
-                                            use_bias=False,
-                                            name='src_selector_embedder')
-        self.trg_selector_embedder = Linear(input_dim=config['num_decs'],
-                                            output_dim=config['trg_rep_dim'],
-                                            use_bias=False,
-                                            name='trg_selector_embedder')
-        self.children = self.encoders + self.annotation_embedders +\
+
+        self.src_selector_embedder = Identity(name='src_selector_embedder')
+        self.trg_selector_embedder = Identity(name='trg_selector_embedder')
+
+        self.children = self.encoders + self.annotation_embedders + \
             [self.src_selector_embedder, self.trg_selector_embedder]
 
     @application
@@ -388,19 +103,18 @@ class MultiEncoder(Initializable):
 
         # Projected Annotations
         rep = self.annotation_embedders[enc_idx].apply(
-                    self.encoders[enc_idx].apply(
-                        source_sentence, source_mask))
+            self.encoders[enc_idx].apply(source_sentence, source_mask))
 
         # Source selector annotations, expand it to have batch size
         # dimensions for further ease in recurrence
         src_selector_rep = self.src_selector_embedder.apply(
-                theano.tensor.repeat(
-                    src_selector[None, :], rep.shape[1], axis=0)
+            theano.tensor.repeat(
+                src_selector[None, :], rep.shape[1], axis=0)
         )
         # Target selector annotations, expand it similarly
         trg_selector_rep = self.trg_selector_embedder.apply(
-                theano.tensor.repeat(
-                    trg_selector[None, :], rep.shape[1], axis=0)
+            theano.tensor.repeat(
+                trg_selector[None, :], rep.shape[1], axis=0)
         )
         return rep, src_selector_rep, trg_selector_rep
 
@@ -416,9 +130,10 @@ class LookupFeedbackWMT15(LookupFeedback):
         outputs_flat_zeros = tensor.switch(outputs_flat < 0, 0,
                                            outputs_flat)
 
-        lookup_flat = tensor.switch(outputs_flat[:, None] < 0,
-                      tensor.alloc(0., outputs_flat.shape[0], self.feedback_dim),
-                      self.lookup.apply(outputs_flat_zeros))
+        lookup_flat = tensor.switch(
+            outputs_flat[:, None] < 0,
+            tensor.alloc(0., outputs_flat.shape[0], self.feedback_dim),
+            self.lookup.apply(outputs_flat_zeros))
         lookup = lookup_flat.reshape(shp+[self.feedback_dim])
         return lookup
 
@@ -448,14 +163,15 @@ class BidirectionalEncoder(Initializable):
         self.enc_id = enc_id
         self.name = 'bidirectionalencoder_%d' % enc_id
 
-        self.fwd_fork = Fork([name for name in self.bidir.prototype.apply.sequences
-                             if name != 'mask'], prototype=Linear(),
-                             name='fwd_fork')
-        self.back_fork = Fork([name for name in self.bidir.prototype.apply.sequences
-                              if name != 'mask'], prototype=Linear(),
-                              name='back_fork')
+        self.fwd_fork = Fork(
+            [name for name in self.bidir.prototype.apply.sequences
+             if name != 'mask'], prototype=Linear(), name='fwd_fork')
+        self.back_fork = Fork(
+            [name for name in self.bidir.prototype.apply.sequences
+             if name != 'mask'], prototype=Linear(), name='back_fork')
 
-        self.children = [self.lookup, self.bidir, self.fwd_fork, self.back_fork]
+        self.children = [self.lookup, self.bidir,
+                         self.fwd_fork, self.back_fork]
 
     def _push_allocation_config(self):
         self.lookup.length = self.vocab_size
@@ -463,16 +179,15 @@ class BidirectionalEncoder(Initializable):
 
         self.fwd_fork.input_dim = self.embedding_dim
         self.fwd_fork.output_dims = [self.state_dim
-                                 for _ in self.fwd_fork.output_names]
+                                     for _ in self.fwd_fork.output_names]
         self.back_fork.input_dim = self.embedding_dim
         self.back_fork.output_dims = [self.state_dim
-                                 for _ in self.back_fork.output_names]
+                                      for _ in self.back_fork.output_names]
 
     @application(inputs=['source_sentence', 'source_sentence_mask'],
                  outputs=['representation'])
     def apply(self, source_sentence, source_sentence_mask):
         # Time as first dimension
-        #source_sentence = theano.printing.Print("Encoder{}:source sentence".format(self.enc_id), ['shape'])(source_sentence)
         source_sentence = source_sentence.T
         source_sentence_mask = source_sentence_mask.T
         embeddings = self.lookup.apply(source_sentence)
@@ -487,8 +202,9 @@ class BidirectionalEncoder(Initializable):
 
 
 class GRUwithContext(BaseRecurrent, Initializable):
-    def __init__(self, attended_dim, dim, context_dim, activation=None, gate_activation=None,
-                 use_update_gate=True, use_reset_gate=True,**kwargs):
+    def __init__(self, attended_dim, dim, context_dim, activation=None,
+                 gate_activation=None, use_update_gate=True,
+                 use_reset_gate=True, **kwargs):
         super(GRUwithContext, self).__init__(**kwargs)
         self.dim = dim
         self.use_update_gate = use_update_gate
@@ -673,16 +389,15 @@ class SequenceMultiContentAttention(GenericSequenceAttention, Initializable):
                                          states)
         weights = self.compute_weights(energies, attended_mask)
         weighted_averages = self.compute_weighted_averages(
-                weights, attendeds[0])
+            weights, attendeds[0])
         return weighted_averages, weights.T
 
     @take_glimpses.property('inputs')
     def take_glimpses_inputs(self):
-        return (['attended_%d' % i
-                 for i in xrange(self.num_attended)] +\
-                ['preprocessed_attended_%d' % i
-                 for i in xrange(self.num_attended)] +\
-                ['attended_mask'] + self.state_names)
+        return (
+            ['attended_%d' % i for i in xrange(self.num_attended)] +
+            ['preprocessed_attended_%d' % i for i in xrange(self.num_attended)] +
+            ['attended_mask'] + self.state_names)
 
     @application
     def initial_glimpses(self, name, batch_size, attended):
@@ -690,7 +405,6 @@ class SequenceMultiContentAttention(GenericSequenceAttention, Initializable):
             return tensor.zeros((batch_size, self.attended_dims[0]))
         elif name == "weights":
             return tensor.zeros((batch_size, attended[0].shape[0]))
-            #return tensor.zeros((attended[0].shape[0], batch_size))
         raise ValueError("Unknown glimpse name {}".format(name))
 
     @application(inputs=['attended'],
@@ -718,7 +432,8 @@ class SequenceMultiContentAttention(GenericSequenceAttention, Initializable):
         return super(SequenceMultiContentAttention, self).get_dim(name)
 
 
-class AttentionRecurrentWithMultiContext(AbstractAttentionRecurrent, Initializable):
+class AttentionRecurrentWithMultiContext(AbstractAttentionRecurrent,
+                                         Initializable):
 
     def __init__(self, num_contexts, transition, attention, **kwargs):
         super(AttentionRecurrentWithMultiContext, self).__init__(**kwargs)
@@ -798,7 +513,8 @@ class AttentionRecurrentWithMultiContext(AbstractAttentionRecurrent, Initializab
         glimpses = dict_subset(kwargs, self._glimpse_names, pop=True)
 
         # This is the additional context to GRU from source selector
-        contexts = dict_subset(kwargs, self.transition.apply.contexts, pop=False)
+        contexts = dict_subset(kwargs, self.transition.apply.contexts,
+                               pop=False)
 
         for name in self.attended_names:
             kwargs.pop(name)
@@ -920,7 +636,7 @@ class SequenceGeneratorWithMultiContext(BaseSequenceGenerator):
 class Decoder(Initializable):
     def __init__(self, vocab_size, embedding_dim, state_dim,
                  representation_dim, src_selector_rep, trg_selector_rep,
-                 src_rep_dim, trg_rep_dim, num_encs, **kwargs):
+                 num_encs, num_decs, **kwargs):
         super(Decoder, self).__init__(**kwargs)
         self.vocab_size = vocab_size
         self.embedding_dim = embedding_dim
@@ -928,19 +644,18 @@ class Decoder(Initializable):
         self.representation_dim = representation_dim
         self.src_selector_rep = src_selector_rep
         self.trg_selector_rep = trg_selector_rep
-        self.src_rep_dim = src_rep_dim
-        self.trg_rep_dim = trg_rep_dim
         self.num_encs = num_encs
+        self.num_decs = num_decs
 
         # Recurrent net
         self.transition = GRUwithContext(
-            attended_dim=state_dim, dim=state_dim, context_dim=src_rep_dim,
+            attended_dim=state_dim, dim=state_dim, context_dim=num_encs,
             activation=Tanh(), name='decoder')
 
         # Attention module
         self.attention = SequenceMultiContentAttention(
             state_names=self.transition.apply.states,
-            attended_dims=[representation_dim, src_rep_dim, trg_rep_dim],
+            attended_dims=[representation_dim, num_encs, num_decs],
             match_dim=state_dim, name="attention")
 
         # Readout module
@@ -1025,20 +740,36 @@ def main(config, tr_stream, dev_streams):
     # Sampling
     sampling_input = tensor.lmatrix('input')
     sampling_mask = tensor.ones(sampling_input.shape)
-    sampling_src_sel = tensor.vector('sampling_src_sel', dtype=theano.config.floatX)
-    sampling_trg_sel = tensor.vector('sampling_trg_sel', dtype=theano.config.floatX)
+    sampling_src_sel = tensor.vector('sampling_src_sel',
+                                     dtype=theano.config.floatX)
+    sampling_trg_sel = tensor.vector('sampling_trg_sel',
+                                     dtype=theano.config.floatX)
+
+    # Currently the nhids of all encoders should be same
+    assert len(set([config['enc_nhids_%d' % ii]
+                    for ii in xrange(config['num_encs'])])) == 1,\
+        "All encoders should have the same hidden size!"
 
     # Construct model
-    multi_encoder = MultiEncoder(config)
-    decoder = Decoder(vocab_size=config['trg_vocab_size'],
-                      embedding_dim=config['dec_embed'],
-                      state_dim=config['dec_nhids'],
-                      representation_dim=config['representation_dim'],
-                      src_selector_rep=src_selector,
-                      trg_selector_rep=trg_selector,
-                      src_rep_dim=config['src_rep_dim'],
-                      trg_rep_dim=config['trg_rep_dim'],
-                      num_encs=config['num_encs'])
+    multi_encoder = MultiEncoder(
+        num_encs=config['num_encs'],
+        num_decs=config['num_decs'],
+        representation_dim=config['representation_dim'],
+        src_vocab_sizes=[config['src_vocab_size_%d' % ii]
+                         for ii in xrange(config['num_encs'])],
+        enc_embed_sizes=[config['enc_embed_%d' % ii]
+                         for ii in xrange(config['num_encs'])],
+        enc_nhids=[config['enc_nhids_%d' % ii]
+                   for ii in xrange(config['num_encs'])])
+    decoder = Decoder(
+        vocab_size=config['trg_vocab_size'],
+        embedding_dim=config['dec_embed'],
+        state_dim=config['dec_nhids'],
+        representation_dim=config['representation_dim'],
+        src_selector_rep=src_selector,
+        trg_selector_rep=trg_selector,
+        num_encs=config['num_encs'],
+        num_decs=config['num_decs'])
 
     # Get costs from each encoder sources
     costs = []
@@ -1047,10 +778,10 @@ def main(config, tr_stream, dev_streams):
             multi_encoder.apply(source_sentence, source_mask,
                                 src_selector, trg_selector, i)
         costs.append(
-                decoder.cost(
-                    representation, source_mask,
-                    target_sentence, target_sentence_mask,
-                    src_selector_rep, trg_selector_rep))
+            decoder.cost(
+                representation, source_mask,
+                target_sentence, target_sentence_mask,
+                src_selector_rep, trg_selector_rep))
         costs[i].name += "_{}".format(i)
 
     # Initialize model
@@ -1082,11 +813,11 @@ def main(config, tr_stream, dev_streams):
 
         logger.info("Parameter names for computation graph[{}]: ".format(i))
         enc_dec_param_dict = merge(
-                Selector(multi_encoder.encoders[i]).get_params(),
-                Selector(multi_encoder.annotation_embedders[i]).get_params(),
-                Selector(multi_encoder.src_selector_embedder).get_params(),
-                Selector(multi_encoder.trg_selector_embedder).get_params(),
-                Selector(decoder).get_params())
+            Selector(multi_encoder.encoders[i]).get_params(),
+            Selector(multi_encoder.annotation_embedders[i]).get_params(),
+            Selector(multi_encoder.src_selector_embedder).get_params(),
+            Selector(multi_encoder.trg_selector_embedder).get_params(),
+            Selector(decoder).get_params())
         for name, value in enc_dec_param_dict.iteritems():
             logger.info('    {:15}: {}'.format(value.get_value().shape, name))
         logger.info("Total number of parameters for computation graph[{}]: {}"
@@ -1100,12 +831,30 @@ def main(config, tr_stream, dev_streams):
         logger.info('    {:15}: {}'.format(value.get_value().shape, name))
     logger.info("Total number of parameters: {}".format(len(enc_dec_param_dict)))
 
+    # Exclude additional parameters from training if any
+    # TODO: create exclude list and use it for training_params
+    excluded_params = []
+    if 'additional_excludes' in config:
+        for i in xrange(config['num_encs']):
+            pass
+
+    # Exclude encoder parameters from training
+    training_params = []
+    if 'exclude_encs' in config:
+        assert config['num_encs'] == len(config['exclude_encs']), \
+            "Erroneous config::[num_encs] should match [exclude_encs]"
+        for i in xrange(config['num_encs']):
+            p_enc = Selector(multi_encoder.encoders[i]).get_params()
+            training_params.append(
+                [p for p in cgs[i].parameters
+                    if not any([pp == p for pp in p_enc.values()])])
+
     # Set up training algorithm
     algorithm = GradientDescentWithMultiCG(
-        costs=costs, params=[cgs[i].parameters for i in xrange(len(cgs))],
-        step_rule=CompositeRule([StepClippingWithRemoveNotFinite(
-                                    threshold=config['step_clipping']),
-                                 eval(config['step_rule'])()]))
+        costs=costs, params=training_params,
+        step_rule=CompositeRule(
+            [StepClippingWithRemoveNotFinite(threshold=config['step_clipping']),
+             eval(config['step_rule'])(learning_rate=config['learning_rate'])]))
 
     # Set up training model
     training_models = []
@@ -1155,7 +904,8 @@ def main(config, tr_stream, dev_streams):
                 bleu_script=config['bleu_script'],
                 val_set_out=config['val_set_out_%d' % i],
                 val_set_grndtruth=config['val_set_grndtruth_%d' % i],
-                beam_size=config['beam_size'], val_burn_in=config['val_burn_in'],
+                beam_size=config['beam_size'],
+                val_burn_in=config['val_burn_in'],
                 enc_id=i, saveto=config['saveto'],
                 every_n_batches=config['bleu_val_freq']))
 
@@ -1187,4 +937,3 @@ if __name__ == "__main__":
     tr_stream = streams[config['stream']].multi_enc_stream
     dev_streams = streams[config['stream']].dev_streams
     main(config, tr_stream, dev_streams)
-

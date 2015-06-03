@@ -92,11 +92,9 @@ class Sampler(SimpleExtension, SamplingBase):
             self._multiCG = self._isMultiCG(batch)
             if self._multiCG:
                 sources = self._get_attr_rec(
-                        self.main_loop.data_stream.streams[self.enc_id],
-                        'data_stream')
+                    self.main_loop.data_stream.streams[self.enc_id],
+                    'data_stream')
                 model_params = self.main_loop.models[self.enc_id].params
-                batch = self.main_loop.data_stream\
-                    .get_batch_with_stream_id(self.enc_id)
             else:
                 sources = self._get_attr_rec(self.main_loop, 'data_stream')
                 model_params = self.main_loop.model.params
@@ -104,6 +102,10 @@ class Sampler(SimpleExtension, SamplingBase):
             self.sources = sources
             self.model.params = model_params
             self._synced = True
+
+        if self._multiCG:
+            batch = self.main_loop.data_stream\
+                .get_batch_with_stream_id(self.enc_id)
 
         batch_size = batch['source'].shape[0]
 
@@ -120,8 +122,10 @@ class Sampler(SimpleExtension, SamplingBase):
             self.trg_vocab = self.sources.data_streams[1].dataset.dictionary
         if not self.src_ivocab:
             self.src_ivocab = {v: k for k, v in self.src_vocab.items()}
+            self.src_ivocab[self.src_vocab['</S>']] = '</S>'
         if not self.trg_ivocab:
             self.trg_ivocab = {v: k for k, v in self.trg_vocab.items()}
+            self.trg_ivocab[self.trg_vocab['</S>']] = '</S>'
 
         sample_idx = numpy.random.choice(
                 batch_size, self.num_samples, replace=False)
@@ -255,12 +259,12 @@ class BleuValidator(SimpleExtension, SamplingBase):
 
             if self._multiCG:
                 self.sources = self._get_attr_rec(
-                        self.main_loop.data_stream.streams[self.enc_id],
-                        'data_stream')
+                    self.main_loop.data_stream.streams[self.enc_id],
+                    'data_stream')
                 self.model.params = self.main_loop.models[self.enc_id].params
             else:
                 self.sources = self._get_attr_rec(
-                        self.main_loop, 'data_stream')
+                    self.main_loop, 'data_stream')
                 self.model.params = self.main_loop.model.params
 
             self._synced = True
@@ -290,7 +294,7 @@ class BleuValidator(SimpleExtension, SamplingBase):
 
             seq = self._oov_to_unk(line[0])
             inputs_dict = {self.source_sentence: numpy.tile(
-                    seq, (self.beam_size, 1))}
+                seq, (self.beam_size, 1))}
 
             # Branch for multiple computation graphs
             if self._multiCG:
@@ -300,8 +304,8 @@ class BleuValidator(SimpleExtension, SamplingBase):
                 trg_selector_input = numpy.tile(
                     1., (1,)).astype(theano.config.floatX)
                 inputs_dict.update(
-                        {self.src_selector: src_selector_input,
-                         self.trg_selector: trg_selector_input})
+                    {self.src_selector: src_selector_input,
+                     self.trg_selector: trg_selector_input})
 
             # draw sample, checking to ensure we don't get an empty string back
             trans, costs = \
@@ -317,7 +321,7 @@ class BleuValidator(SimpleExtension, SamplingBase):
                     trans_out = trans[best]
 
                     # convert idx to words
-                    trans_out = self._idx_to_word(trans_out, self.trg_ivocab)
+                    trans_out = self._idx_to_word(trans_out[:-1], self.trg_ivocab)
 
                 except ValueError:
                     print "Can NOT find a translation for line: {}".format(i+1)
@@ -384,17 +388,17 @@ class BleuValidator(SimpleExtension, SamplingBase):
             if self._multiCG:
                 for i in xrange(self.main_loop.num_cgs):
                     params_to_save.append(
-                            self.main_loop.models[i].get_param_values())
+                        self.main_loop.models[i].get_param_values())
                 params_to_save = merge(params_to_save)
             else:
                 params_to_save = self.main_loop.model.get_param_values()
 
             numpy.savez(model.path, **params_to_save)
             numpy.savez(
-                    os.path.join(
-                        self.saveto,
-                        'val_bleu_scores{}.npz'.format(self.enc_id)),
-                    bleu_scores=self.val_bleu_curve)
+                os.path.join(
+                    self.saveto,
+                    'val_bleu_scores{}.npz'.format(self.enc_id)),
+                bleu_scores=self.val_bleu_curve)
             signal.signal(signal.SIGINT, s)
 
 

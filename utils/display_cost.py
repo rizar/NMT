@@ -4,7 +4,10 @@ import cPickle as pkl
 import numpy as np
 from matplotlib import pyplot as plt
 
+# Give path to log file
 logfile = sys.argv[1]
+
+# Change this if necessary
 items = ['decoder_cost_cost_0', 'decoder_cost_cost_1', 'decoder_cost_cost_2']
 
 try:
@@ -28,5 +31,3 @@ try:
 
 except Exception as e:
     print str(e)
-
-

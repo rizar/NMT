@@ -70,10 +70,10 @@ class MultiEncStream(Transformer, six.Iterator):
         return self
 
     def __next__(self):
+        import ipdb;ipdb.set_trace()
         batch = self._get_batch_with_reset(
-                self.epoch_iterators[self.curr_id])
+            self.epoch_iterators[self.curr_id])
         self._add_selectors(batch, self.curr_id)
-        #self._add_missing_sources(batch, self.curr_id)
         self._update_counters()
         return batch
 
@@ -227,6 +227,6 @@ for i in xrange(config['num_encs']):
     if 'val_set_%d' % i in config and config['val_set_%d' % i]:
         dev_file = config['val_set_%d' % i]
         dev_dataset = TextFile(
-                [dev_file], cPickle.load(open(src_vocabs[i])), None)
+            [dev_file], cPickle.load(open(src_vocabs[i])), None)
         dev_streams.append(DataStream(dev_dataset))
 
