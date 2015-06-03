@@ -5,11 +5,13 @@ import os
 import re
 import signal
 import time
+import theano
 
 from blocks.extensions import SimpleExtension
 from blocks.search import BeamSearch
 
 from subprocess import Popen, PIPE
+from toolz import merge
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +29,7 @@ class SamplingBase(object):
             return len(seq)
 
     def _oov_to_unk(self, seq):
-        return [x if x < self.state['src_vocab_size'] else self.unk_idx
+        return [x if x < self.src_vocab_size else self.unk_idx
                 for x in seq]
 
     def _parse_input(self, line):
@@ -36,7 +38,7 @@ class SamplingBase(object):
         seq = numpy.zeros(seqlen+1, dtype='int64')
         for idx, sx in enumerate(seqin):
             seq[idx] = self.vocab.get(sx, self.unk_idx)
-            if seq[idx] >= self.state['src_vocab_size']:
+            if seq[idx] >= self.src_vocab_size:
                 seq[idx] = self.unk_idx
         seq[-1] = self.eos_idx
         return seq
@@ -44,63 +46,109 @@ class SamplingBase(object):
     def _idx_to_word(self, seq, ivocab):
         return " ".join([ivocab.get(idx, "<UNK>") for idx in seq])
 
+    def _isMultiCG(self, batch):
+        if not hasattr(self.main_loop, 'num_cgs'):
+            return False
+        if not self.main_loop.num_cgs > 1:
+            return False
+        if not isinstance(self.enc_id, int):
+            return False
+        if not self.enc_id < self.main_loop.num_cgs:
+            return False
+        if 'src_selector' not in batch:
+            return False
+        if 'trg_selector' not in batch:
+            return False
+        return True
+
 
 class Sampler(SimpleExtension, SamplingBase):
+    """Samples from computation graph
 
-    def __init__(self, model, data_stream, state,
+        Does not use peeked batches
+    """
+
+    def __init__(self, model, data_stream, num_samples=1,
                  src_vocab=None, trg_vocab=None, src_ivocab=None,
-                 trg_ivocab=None, **kwargs):
+                 trg_ivocab=None, enc_id=None, **kwargs):
         super(Sampler, self).__init__(**kwargs)
         self.model = model
-        self.state = state
         self.data_stream = data_stream
+        self.num_samples = num_samples
         self.src_vocab = src_vocab
         self.trg_vocab = trg_vocab
         self.src_ivocab = src_ivocab
         self.trg_ivocab = trg_ivocab
-        self.is_synced = False
+        self.enc_id = enc_id if enc_id is not None else ""
+        self._synced = False
         self.sampling_fn = model.get_theano_function()
 
     def do(self, which_callback, *args):
 
-        # Get current model parameters
-        if not self.is_synced:
-            self.model.params = self.main_loop.model.params
-            self.is_synced = True
+        batch = args[0]
 
-        # Get dictionaries, this may not be the practical way
-        sources = self._get_attr_rec(self.main_loop, 'data_stream')
+        # Get current model parameters
+        if not self._synced:
+            self._multiCG = self._isMultiCG(batch)
+            if self._multiCG:
+                sources = self._get_attr_rec(
+                    self.main_loop.data_stream.streams[self.enc_id],
+                    'data_stream')
+                model_params = self.main_loop.models[self.enc_id].params
+            else:
+                sources = self._get_attr_rec(self.main_loop, 'data_stream')
+                model_params = self.main_loop.model.params
+
+            self.sources = sources
+            self.model.params = model_params
+            self._synced = True
+
+        if self._multiCG:
+            batch = self.main_loop.data_stream\
+                .get_batch_with_stream_id(self.enc_id)
+
+        batch_size = batch['source'].shape[0]
+
+        # Get input names
+        src_name = self.sources.sources[0]
+        trg_name = self.sources.sources[1]
 
         # Load vocabularies and invert if necessary
         # WARNING: Source and target indices from data stream
         #  can be different
         if not self.src_vocab:
-            self.src_vocab = sources.data_streams[0].dataset.dictionary
+            self.src_vocab = self.sources.data_streams[0].dataset.dictionary
         if not self.trg_vocab:
-            self.trg_vocab = sources.data_streams[1].dataset.dictionary
+            self.trg_vocab = self.sources.data_streams[1].dataset.dictionary
         if not self.src_ivocab:
             self.src_ivocab = {v: k for k, v in self.src_vocab.items()}
+            self.src_ivocab[self.src_vocab['</S>']] = '</S>'
         if not self.trg_ivocab:
             self.trg_ivocab = {v: k for k, v in self.trg_vocab.items()}
+            self.trg_ivocab[self.trg_vocab['</S>']] = '</S>'
 
-        # Randomly select source samples from the current batch
-        # WARNING: Source and target indices from data stream
-        #  can be different
-        batch = args[0]
-
-        sample_idx = numpy.random.choice(self.state['batch_size'],
-                        self.state['hook_samples'], replace=False)
-        src_batch = batch[self.main_loop.data_stream.mask_sources[0]]
-        trg_batch = batch[self.main_loop.data_stream.mask_sources[1]]
+        sample_idx = numpy.random.choice(
+                batch_size, self.num_samples, replace=False)
+        src_batch = batch[src_name]
+        trg_batch = batch[trg_name]
 
         input_ = src_batch[sample_idx, :]
         target_ = trg_batch[sample_idx, :]
 
+        # Add inputs if selectors are specified
+        # TODO: ordering matters here, fix it properly
+        inputs = [input_]
+        if self._multiCG:
+            inputs += [batch['trg_selector']]
+            inputs += [batch['src_selector']]
+
         # Sample
-        _1, outputs, _2, _3, costs = (self.sampling_fn(input_))
+        _1, outputs, _2, _3, costs = (self.sampling_fn(*inputs))
         outputs = outputs.T
         costs = list(costs.T)
 
+        print ""
+        print "Sampling from computation graph[{}]".format(self.enc_id)
         for i in range(len(outputs)):
             input_length = self._get_true_length(input_[i], self.src_vocab)
             target_length = self._get_true_length(target_[i], self.trg_vocab)
@@ -119,21 +167,37 @@ class Sampler(SimpleExtension, SamplingBase):
 class BleuValidator(SimpleExtension, SamplingBase):
 
     def __init__(self, source_sentence, samples, model, data_stream,
-                 state, n_best=1, track_n_models=1, trg_ivocab=None,
+                 bleu_script, val_set_out, val_set_grndtruth, src_vocab_size,
+                 src_selector=None, trg_selector=None,
+                 n_best=1, track_n_models=1, trg_ivocab=None,
+                 beam_size=5, val_burn_in=10000,
+                 _reload=True, enc_id=None, saveto=None,
                  **kwargs):
         super(BleuValidator, self).__init__(**kwargs)
         self.source_sentence = source_sentence
         self.samples = samples
         self.model = model
         self.data_stream = data_stream
-        self.state = state
+        self.bleu_script = bleu_script
+        self.val_set_out = val_set_out
+        self.val_set_grndtruth = val_set_grndtruth
+        self.src_vocab_size = src_vocab_size
+        self.src_selector = src_selector
+        self.trg_selector = trg_selector
         self.n_best = n_best
         self.track_n_models = track_n_models
-        self.verbose = state.get('val_set_out', None)
+        self.trg_ivocab = trg_ivocab
+        self.beam_size = beam_size
+        self.val_burn_in = val_burn_in
+        self._reload = _reload
+        self.enc_id = enc_id if enc_id is not None else ""
+        self.saveto = saveto if saveto else "."
+        self.verbose = val_set_out
+        self._synced = False
+        self._multiCG = False
 
         # Helpers
         self.vocab = data_stream.dataset.dictionary
-        self.trg_ivocab = trg_ivocab
         self.unk_sym = data_stream.dataset.unk_token
         self.eos_sym = data_stream.dataset.eos_token
         self.unk_idx = self.vocab[self.unk_sym]
@@ -141,19 +205,19 @@ class BleuValidator(SimpleExtension, SamplingBase):
         self.best_models = []
         self.val_bleu_curve = []
         self.beam_search = BeamSearch(source_sentence,
-                                      beam_size=self.state['beam_size'],
+                                      beam_size=beam_size,
                                       samples=samples)
-        self.multibleu_cmd = ['perl', self.state['bleu_script'],
-                              self.state['val_set_grndtruth'], '<']
+        self.multibleu_cmd = ['perl', bleu_script, val_set_grndtruth, '<']
 
         # Create saving directory if it does not exist
-        if not os.path.exists(self.state['saveto']):
-            os.makedirs(self.state['saveto'])
+        if not os.path.exists(saveto):
+            os.makedirs(saveto)
 
-        if self.state['reload']:
+        if self._reload:
             try:
-                bleu_score = numpy.load(os.path.join(self.state['saveto'],
-                                        'val_bleu_scores.npz'))
+                bleu_score = numpy.load(
+                        os.path.join(
+                            saveto, 'val_bleu_scores{}.npz'.format(self.enc_id)))
                 self.val_bleu_curve = bleu_score['bleu_scores'].tolist()
 
                 # Track n best previous bleu scores
@@ -168,13 +232,42 @@ class BleuValidator(SimpleExtension, SamplingBase):
     def do(self, which_callback, *args):
 
         # Track validation burn in
-        if self.main_loop.status['iterations_done'] <= \
-                self.state['val_burn_in']:
+        if self.main_loop.status['iterations_done'] <= self.val_burn_in:
             return
 
         # Get current model parameters
-        self.model.set_param_values(
-            self.main_loop.model.get_param_values())
+        if not self._synced:
+            batch = args[0]
+
+            # Determine if using multiple Computation Graphs or not
+            if hasattr(self.main_loop, 'num_cgs') and\
+                    self.main_loop.num_cgs > 1 and\
+                    'src_selector' in batch:
+                if not isinstance(self.enc_id, int):
+                    raise ValueError(
+                        "Specify Computation Graph ID for BeamSearch")
+                if not self.enc_id < self.main_loop.num_cgs:
+                    raise ValueError(
+                        "Invalid Computation Graph ID given in BeamSearch")
+                if not self.src_selector:
+                    raise ValueError(
+                        "Source Selector variable not given in BeamSearch")
+                if not self.trg_selector:
+                    raise ValueError(
+                        "Target Selector variable not given in BeamSearch")
+                self._multiCG = True
+
+            if self._multiCG:
+                self.sources = self._get_attr_rec(
+                    self.main_loop.data_stream.streams[self.enc_id],
+                    'data_stream')
+                self.model.params = self.main_loop.models[self.enc_id].params
+            else:
+                self.sources = self._get_attr_rec(
+                    self.main_loop, 'data_stream')
+                self.model.params = self.main_loop.model.params
+
+            self._synced = True
 
         # Evaluate and save if necessary
         self._save_model(self._evaluate_model())
@@ -188,12 +281,11 @@ class BleuValidator(SimpleExtension, SamplingBase):
 
         # Get target vocabulary
         if not self.trg_ivocab:
-            sources = self._get_attr_rec(self.main_loop, 'data_stream')
-            trg_vocab = sources.data_streams[1].dataset.dictionary
+            trg_vocab = self.sources.data_streams[1].dataset.dictionary
             self.trg_ivocab = {v: k for k, v in trg_vocab.items()}
 
         if self.verbose:
-            ftrans = open(self.state['val_set_out'], 'w')
+            ftrans = open(self.val_set_out, 'w')
 
         for i, line in enumerate(self.data_stream.get_epoch_iterator()):
             """
@@ -201,12 +293,24 @@ class BleuValidator(SimpleExtension, SamplingBase):
             """
 
             seq = self._oov_to_unk(line[0])
-            input_ = numpy.tile(seq, (self.state['beam_size'], 1))
+            inputs_dict = {self.source_sentence: numpy.tile(
+                seq, (self.beam_size, 1))}
+
+            # Branch for multiple computation graphs
+            if self._multiCG:
+                src_selector_input = numpy.zeros(
+                    (self.main_loop.num_cgs,)).astype(theano.config.floatX)
+                src_selector_input[self.enc_id] = 1.
+                trg_selector_input = numpy.tile(
+                    1., (1,)).astype(theano.config.floatX)
+                inputs_dict.update(
+                    {self.src_selector: src_selector_input,
+                     self.trg_selector: trg_selector_input})
 
             # draw sample, checking to ensure we don't get an empty string back
             trans, costs = \
                 self.beam_search.search(
-                    input_values={self.source_sentence: input_},
+                    input_values=inputs_dict,
                     max_length=3*len(seq), eol_symbol=self.eos_idx,
                     ignore_first_eol=True)
 
@@ -217,7 +321,7 @@ class BleuValidator(SimpleExtension, SamplingBase):
                     trans_out = trans[best]
 
                     # convert idx to words
-                    trans_out = self._idx_to_word(trans_out, self.trg_ivocab)
+                    trans_out = self._idx_to_word(trans_out[:-1], self.trg_ivocab)
 
                 except ValueError:
                     print "Can NOT find a translation for line: {}".format(i+1)
@@ -264,7 +368,7 @@ class BleuValidator(SimpleExtension, SamplingBase):
 
     def _save_model(self, bleu_score):
         if self._is_valid_to_save(bleu_score):
-            model = ModelInfo(bleu_score, self.state['saveto'])
+            model = ModelInfo(bleu_score, self.saveto, self.enc_id)
 
             # Manage n-best model list first
             if len(self.best_models) >= self.track_n_models:
@@ -280,19 +384,31 @@ class BleuValidator(SimpleExtension, SamplingBase):
             # Save the model here
             s = signal.signal(signal.SIGINT, signal.SIG_IGN)
             logger.info("Saving new model {}".format(model.path))
-            numpy.savez(model.path, **self.main_loop.model.get_param_values())
-            numpy.savez(os.path.join(self.state['saveto'],'val_bleu_scores.npz'),
-                        bleu_scores=self.val_bleu_curve)
+            params_to_save = []
+            if self._multiCG:
+                for i in xrange(self.main_loop.num_cgs):
+                    params_to_save.append(
+                        self.main_loop.models[i].get_param_values())
+                params_to_save = merge(params_to_save)
+            else:
+                params_to_save = self.main_loop.model.get_param_values()
+
+            numpy.savez(model.path, **params_to_save)
+            numpy.savez(
+                os.path.join(
+                    self.saveto,
+                    'val_bleu_scores{}.npz'.format(self.enc_id)),
+                bleu_scores=self.val_bleu_curve)
             signal.signal(signal.SIGINT, s)
 
 
 class ModelInfo:
-    def __init__(self, bleu_score, path=None):
+    def __init__(self, bleu_score, path=None, enc_id=None):
         self.bleu_score = bleu_score
-        self.path = self._generate_path(path)
+        self.enc_id = enc_id if enc_id is not None else ''
+        self.path = self._generate_path(path) if path else None
 
     def _generate_path(self, path):
-        gen_path = os.path.join(
-            path, 'best_bleu_model_%d_BLEU%.2f.npz' %
-            (int(time.time()), self.bleu_score) if path else None)
-        return gen_path
+        return os.path.join(
+                path, 'best_bleu_model{}_{}_BLEU{:.2f}.npz'.format(
+                    self.enc_id, int(time.time()), self.bleu_score))

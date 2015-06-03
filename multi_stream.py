@@ -34,10 +34,14 @@ class PrintMultiStream(SimpleExtension):
         counters = self.main_loop.data_stream.training_counter
         epochs = self.main_loop.data_stream.epoch_counter
         sid = self.main_loop.data_stream.curr_id
-        msg = ['source_{}:iter[{}]-epoch[{}]'.format(i, c, e) for i, (c, e) in
-                enumerate(zip(counters, epochs))]
+        src_size = args[0]['source'].shape
+        trg_size = args[0]['target'].shape
+        msg = ['Source_{}:iter[{}]-epoch[{}]'.format(i, c, e)
+               for i, (c, e) in enumerate(zip(counters, epochs))]
         print("Multi-stream status:")
         print "\t", "Using stream: source_{}".format(sid)
+        print "\t", "Source shape: {}".format(src_size)
+        print "\t", "Target shape: {}".format(trg_size)
         print "\t", " ".join(msg)
 
 
@@ -66,10 +70,10 @@ class MultiEncStream(Transformer, six.Iterator):
         return self
 
     def __next__(self):
+        import ipdb;ipdb.set_trace()
         batch = self._get_batch_with_reset(
-                self.epoch_iterators[self.curr_id])
+            self.epoch_iterators[self.curr_id])
         self._add_selectors(batch, self.curr_id)
-        self._add_missing_sources(batch, self.curr_id)
         self._update_counters()
         return batch
 
@@ -111,9 +115,14 @@ class MultiEncStream(Transformer, six.Iterator):
         for i in xrange(self.num_encs):
             batch = self._get_batch_with_reset(self.epoch_iterators[i])
             self._add_selectors(batch, i)
-            self._add_missing_sources(batch, i)
+            #self._add_missing_sources(batch, i)
             batches.append(batch)
         return batches
+
+    def get_batch_with_stream_id(self, stream_id):
+        batch = self._get_batch_with_reset(self.epoch_iterators[stream_id])
+        self._add_selectors(batch, stream_id)
+        return batch
 
     def _get_attr_rec(self, obj, attr):
         return self._get_attr_rec(getattr(obj, attr), attr) \
@@ -140,7 +149,6 @@ class MultiEncStream(Transformer, six.Iterator):
         self.epoch_counter[idx] += 1
 
 
-
 # If you wrap following functions, main_loop cannot be pickled ****************
 def _length(sentence_pair):
     '''Assumes target is the last element in the tuple'''
@@ -153,12 +161,12 @@ def _oov_to_unk(sentence_pair, src_vocab_size=30000,
             [x if x < trg_vocab_size else unk_id for x in sentence_pair[1]])
 
 
-def _too_long(sentence_pair, params):
-    # TODO: harmonize argumenrs with oov_to_unk
+def _too_long(sentence_pair, **kwargs):
+    # TODO: harmonize arguments with oov_to_unk
     seq_len = 50
-    if 'seq_len' in params:
-        seq_len = params['seq_len']
-    return all([len(sentence) < seq_len
+    if 'seq_len' in kwargs:
+        seq_len = kwargs['seq_len']
+    return all([len(sentence) <= seq_len
                 for sentence in sentence_pair])
 
 
@@ -190,9 +198,9 @@ ind_streams = []
 for i in xrange(num_encs):
     stream = Merge([src_datasets[i].get_example_stream(),
                     trg_datasets[i].get_example_stream()],
-                   ('source_%d' % i, 'target'))
+                   ('source', 'target'))
     stream = Filter(stream, predicate=_too_long,
-                    predicate_args={'seq_len':config['seq_len']})
+                    predicate_args={'seq_len': config['seq_len']})
     stream = Mapping(stream, _oov_to_unk,
                      src_vocab_size=config['src_vocab_size_%d' % i],
                      trg_vocab_size=config['trg_vocab_size'],
@@ -210,4 +218,15 @@ for i in xrange(num_encs):
 
 multi_enc_stream = MultiEncStream(ind_streams, schedule=config['schedule'],
                                   batch_sizes=[config['batch_size_enc_%d' % i]
-                                              for i in xrange(num_encs)]  )
+                                               for i in xrange(num_encs)])
+
+# Development set streams *****************************************************
+# Setup development set stream if necessary
+dev_streams = []
+for i in xrange(config['num_encs']):
+    if 'val_set_%d' % i in config and config['val_set_%d' % i]:
+        dev_file = config['val_set_%d' % i]
+        dev_dataset = TextFile(
+            [dev_file], cPickle.load(open(src_vocabs[i])), None)
+        dev_streams.append(DataStream(dev_dataset))
+

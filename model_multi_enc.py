@@ -2,30 +2,24 @@
 # Works with https://github.com/orhanf/blocks/tree/wmt15
 # 0e23b0193f64dc3e56da18605d53d6f5b1352848
 import argparse
-import numpy
 import logging
 import pprint
 import theano
 from collections import Counter
 from theano import tensor
-from theano.ifelse import ifelse
 from toolz import merge
 from picklable_itertools.extras import equizip
 
-from blocks.algorithms import (GradientDescent, StepClipping, AdaDelta,
-                               CompositeRule)
-from blocks.dump import MainLoopDumpManager
-from blocks.main_loop import MainLoop
+from blocks.algorithms import (AdaDelta, CompositeRule, Adam)
+from blocks.filter import VariableFilter
 from blocks.model import Model
 from blocks.graph import ComputationGraph
 from blocks.initialization import IsotropicGaussian, Orthogonal, Constant
 from blocks.extensions import Printing
-from blocks.extensions.monitoring import TrainingDataMonitoring
 from blocks.extensions.plot import Plot
-from blocks.extensions.saveload import LoadFromDump, Dump
 
 from blocks.bricks import (Tanh, Maxout, Linear, FeedforwardSequence,
-                           Bias, Initializable, MLP, Sigmoid)
+                           Bias, Initializable, MLP, Sigmoid, Identity)
 from blocks.bricks.attention import (ShallowEnergyComputer,
                                      AbstractAttentionRecurrent,
                                      GenericSequenceAttention)
@@ -39,10 +33,18 @@ from blocks.bricks.sequence_generators import (
     LookupFeedback, Readout, SoftmaxEmitter,
     BaseSequenceGenerator
 )
-from blocks.utils import dict_union, dict_subset, shared_floatx_nans
+from blocks.utils import (dict_union, dict_subset, shared_floatx_nans)
 
 import config
-import stream_fide_en
+import multi_stream
+
+from multiCG_algorithm import (GradientDescentWithMultiCG,
+                               StepClippingWithRemoveNotFinite,
+                               MainLoopWithMultiCG)
+from multiCG_extensions import (TrainingDataMonitoringWithMultiCG,
+                                DumpWithMultiCG,
+                                LoadFromDumpMultiCG)
+from sampling import Sampler, BleuValidator
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +59,8 @@ args = parser.parse_args()
 config = getattr(config, args.proto)()
 
 # dictionary mapping stream name to stream getters
-streams = {'fide-en': stream_fide_en}
+streams = {'fide-en': multi_stream,
+           'fideen-en': multi_stream}
 
 
 class MainLoopDumpManagerWMT15(MainLoopDumpManager):
@@ -106,69 +109,53 @@ class InitializableFeedforwardSequence(FeedforwardSequence, Initializable):
 
 class MultiEncoder(Initializable):
 
-    def __init__(self, config, **kwargs):
+    def __init__(self, num_encs, num_decs, src_vocab_sizes, enc_embed_sizes,
+                 enc_nhids, representation_dim, **kwargs):
         super(MultiEncoder, self).__init__(**kwargs)
 
-        self.num_encs = config['num_encs']
+        self.num_encs = num_encs
         self.encoders = []
         for i in xrange(self.num_encs):
             self.encoders.append(
                 BidirectionalEncoder(
-                    config['src_vocab_size_%d' % i],
-                    config['enc_embed_%d' % i],
-                    config['enc_nhids_%d' % i],
+                    src_vocab_sizes[i],
+                    enc_embed_sizes[i],
+                    enc_nhids[i],
                     enc_id=i))
 
         # this is the embedding from h to z
-        self.annotation_embedders = [Linear(input_dim=(2 * config['enc_nhids_%d' % i]),
-                                            output_dim=config['representation_dim'],
+        self.annotation_embedders = [Linear(input_dim=(2 * enc_nhids[i]),
+                                            output_dim=representation_dim,
                                             name='annotation_embedder_%d' % i,
                                             use_bias=False)
                                      for i in xrange(self.num_encs)]
-        self.src_selector_embedder = Linear(input_dim=config['num_encs'],
-                                            output_dim=config['src_rep_dim'],
-                                            use_bias=False,
-                                            name='src_selector_embedder')
-        self.trg_selector_embedder = Linear(input_dim=config['num_decs'],
-                                            output_dim=config['trg_rep_dim'],
-                                            use_bias=False,
-                                            name='trg_selector_embedder')
-        self.children = self.encoders + self.annotation_embedders +\
+
+        self.src_selector_embedder = Identity(name='src_selector_embedder')
+        self.trg_selector_embedder = Identity(name='trg_selector_embedder')
+
+        self.children = self.encoders + self.annotation_embedders + \
             [self.src_selector_embedder, self.trg_selector_embedder]
 
     @application
-    def apply(self, source_sentences, source_masks, src_selector, trg_selector):
+    def apply(self, source_sentence, source_mask,
+              src_selector, trg_selector, enc_idx):
 
         # Projected Annotations
-        rep = ifelse(
-                theano.tensor.eq(src_selector[0], 1.),
-                self.annotation_embedders[0].apply(
-                    self.encoders[0].apply(source_sentences[0], source_masks[0])),
-                self.annotation_embedders[1].apply(
-                 self.encoders[1].apply(source_sentences[1], source_masks[1]))
-        )
-
-        # Source mask
-        mask = ifelse(
-                theano.tensor.eq(src_selector[0], 1.),
-                source_masks[0], source_masks[1])
+        rep = self.annotation_embedders[enc_idx].apply(
+            self.encoders[enc_idx].apply(source_sentence, source_mask))
 
         # Source selector annotations, expand it to have batch size
         # dimensions for further ease in recurrence
         src_selector_rep = self.src_selector_embedder.apply(
-                #theano.tensor.repeat(
-                theano.tensor.repeat(
-                    src_selector[None, :], rep.shape[1], axis=0)  #[None, :, :]
-                #,rep.shape[0], axis=0)
+            theano.tensor.repeat(
+                src_selector[None, :], rep.shape[1], axis=0)
         )
         # Target selector annotations, expand it similarly
         trg_selector_rep = self.trg_selector_embedder.apply(
-                #theano.tensor.repeat(
-                theano.tensor.repeat(
-                    trg_selector[None, :], rep.shape[1], axis=0)  #[None, :, :]
-                #,rep.shape[0], axis=0)
+            theano.tensor.repeat(
+                trg_selector[None, :], rep.shape[1], axis=0)
         )
-        return rep, mask, src_selector_rep, trg_selector_rep
+        return rep, src_selector_rep, trg_selector_rep
 
 
 class LookupFeedbackWMT15(LookupFeedback):
@@ -182,9 +169,10 @@ class LookupFeedbackWMT15(LookupFeedback):
         outputs_flat_zeros = tensor.switch(outputs_flat < 0, 0,
                                            outputs_flat)
 
-        lookup_flat = tensor.switch(outputs_flat[:, None] < 0,
-                      tensor.alloc(0., outputs_flat.shape[0], self.feedback_dim),
-                      self.lookup.apply(outputs_flat_zeros))
+        lookup_flat = tensor.switch(
+            outputs_flat[:, None] < 0,
+            tensor.alloc(0., outputs_flat.shape[0], self.feedback_dim),
+            self.lookup.apply(outputs_flat_zeros))
         lookup = lookup_flat.reshape(shp+[self.feedback_dim])
         return lookup
 
@@ -211,16 +199,18 @@ class BidirectionalEncoder(Initializable):
         self.lookup = LookupTable(name='embeddings')
         self.bidir = BidirectionalWMT15(GatedRecurrent(activation=Tanh(),
                                                        dim=state_dim))
+        self.enc_id = enc_id
         self.name = 'bidirectionalencoder_%d' % enc_id
 
-        self.fwd_fork = Fork([name for name in self.bidir.prototype.apply.sequences
-                             if name != 'mask'], prototype=Linear(),
-                             name='fwd_fork')
-        self.back_fork = Fork([name for name in self.bidir.prototype.apply.sequences
-                              if name != 'mask'], prototype=Linear(),
-                              name='back_fork')
+        self.fwd_fork = Fork(
+            [name for name in self.bidir.prototype.apply.sequences
+             if name != 'mask'], prototype=Linear(), name='fwd_fork')
+        self.back_fork = Fork(
+            [name for name in self.bidir.prototype.apply.sequences
+             if name != 'mask'], prototype=Linear(), name='back_fork')
 
-        self.children = [self.lookup, self.bidir, self.fwd_fork, self.back_fork]
+        self.children = [self.lookup, self.bidir,
+                         self.fwd_fork, self.back_fork]
 
     def _push_allocation_config(self):
         self.lookup.length = self.vocab_size
@@ -228,10 +218,10 @@ class BidirectionalEncoder(Initializable):
 
         self.fwd_fork.input_dim = self.embedding_dim
         self.fwd_fork.output_dims = [self.state_dim
-                                 for _ in self.fwd_fork.output_names]
+                                     for _ in self.fwd_fork.output_names]
         self.back_fork.input_dim = self.embedding_dim
         self.back_fork.output_dims = [self.state_dim
-                                 for _ in self.back_fork.output_names]
+                                      for _ in self.back_fork.output_names]
 
     @application(inputs=['source_sentence', 'source_sentence_mask'],
                  outputs=['representation'])
@@ -239,7 +229,6 @@ class BidirectionalEncoder(Initializable):
         # Time as first dimension
         source_sentence = source_sentence.T
         source_sentence_mask = source_sentence_mask.T
-
         embeddings = self.lookup.apply(source_sentence)
 
         representation = self.bidir.apply(
@@ -252,8 +241,9 @@ class BidirectionalEncoder(Initializable):
 
 
 class GRUwithContext(BaseRecurrent, Initializable):
-    def __init__(self, attended_dim, dim, context_dim, activation=None, gate_activation=None,
-                 use_update_gate=True, use_reset_gate=True,**kwargs):
+    def __init__(self, attended_dim, dim, context_dim, activation=None,
+                 gate_activation=None, use_update_gate=True,
+                 use_reset_gate=True, **kwargs):
         super(GRUwithContext, self).__init__(**kwargs)
         self.dim = dim
         self.use_update_gate = use_update_gate
@@ -418,7 +408,7 @@ class SequenceMultiContentAttention(GenericSequenceAttention, Initializable):
     @application
     def compute_energies(self, attendeds, preprocessed_attendeds,
                          states):
-        if not preprocessed_attendeds:
+        if not all(preprocessed_attendeds):
             preprocessed_attendeds = self.preprocess(attendeds)
         transformed_states = self.state_transformers.apply(as_dict=True,
                                                            **states)
@@ -438,16 +428,15 @@ class SequenceMultiContentAttention(GenericSequenceAttention, Initializable):
                                          states)
         weights = self.compute_weights(energies, attended_mask)
         weighted_averages = self.compute_weighted_averages(
-                weights, attendeds[0])
+            weights, attendeds[0])
         return weighted_averages, weights.T
 
     @take_glimpses.property('inputs')
     def take_glimpses_inputs(self):
-        return (['attended_%d' % i
-                 for i in xrange(self.num_attended)] +\
-                ['preprocessed_attended_%d' % i
-                 for i in xrange(self.num_attended)] +\
-                ['attended_mask'] + self.state_names)
+        return (
+            ['attended_%d' % i for i in xrange(self.num_attended)] +
+            ['preprocessed_attended_%d' % i for i in xrange(self.num_attended)] +
+            ['attended_mask'] + self.state_names)
 
     @application
     def initial_glimpses(self, name, batch_size, attended):
@@ -455,7 +444,6 @@ class SequenceMultiContentAttention(GenericSequenceAttention, Initializable):
             return tensor.zeros((batch_size, self.attended_dims[0]))
         elif name == "weights":
             return tensor.zeros((batch_size, attended[0].shape[0]))
-            #return tensor.zeros((attended[0].shape[0], batch_size))
         raise ValueError("Unknown glimpse name {}".format(name))
 
     @application(inputs=['attended'],
@@ -483,7 +471,8 @@ class SequenceMultiContentAttention(GenericSequenceAttention, Initializable):
         return super(SequenceMultiContentAttention, self).get_dim(name)
 
 
-class AttentionRecurrentWithMultiContext(AbstractAttentionRecurrent, Initializable):
+class AttentionRecurrentWithMultiContext(AbstractAttentionRecurrent,
+                                         Initializable):
 
     def __init__(self, num_contexts, transition, attention, **kwargs):
         super(AttentionRecurrentWithMultiContext, self).__init__(**kwargs)
@@ -563,7 +552,8 @@ class AttentionRecurrentWithMultiContext(AbstractAttentionRecurrent, Initializab
         glimpses = dict_subset(kwargs, self._glimpse_names, pop=True)
 
         # This is the additional context to GRU from source selector
-        contexts = dict_subset(kwargs, self.transition.apply.contexts, pop=False)
+        contexts = dict_subset(kwargs, self.transition.apply.contexts,
+                               pop=False)
 
         for name in self.attended_names:
             kwargs.pop(name)
@@ -685,7 +675,7 @@ class SequenceGeneratorWithMultiContext(BaseSequenceGenerator):
 class Decoder(Initializable):
     def __init__(self, vocab_size, embedding_dim, state_dim,
                  representation_dim, src_selector_rep, trg_selector_rep,
-                 src_rep_dim, trg_rep_dim, num_encs, **kwargs):
+                 num_encs, num_decs, **kwargs):
         super(Decoder, self).__init__(**kwargs)
         self.vocab_size = vocab_size
         self.embedding_dim = embedding_dim
@@ -693,19 +683,18 @@ class Decoder(Initializable):
         self.representation_dim = representation_dim
         self.src_selector_rep = src_selector_rep
         self.trg_selector_rep = trg_selector_rep
-        self.src_rep_dim = src_rep_dim
-        self.trg_rep_dim = trg_rep_dim
         self.num_encs = num_encs
+        self.num_decs = num_decs
 
         # Recurrent net
         self.transition = GRUwithContext(
-            attended_dim=state_dim, dim=state_dim, context_dim=src_rep_dim,
+            attended_dim=state_dim, dim=state_dim, context_dim=num_encs,
             activation=Tanh(), name='decoder')
 
         # Attention module
         self.attention = SequenceMultiContentAttention(
             state_names=self.transition.apply.states,
-            attended_dims=[representation_dim, src_rep_dim, trg_rep_dim],
+            attended_dims=[representation_dim, num_encs, num_decs],
             match_dim=state_dim, name="attention")
 
         # Readout module
@@ -759,64 +748,86 @@ class Decoder(Initializable):
         return (cost * target_sentence_mask).sum() / target_sentence_mask.shape[1]
 
     @application
-    def generate(self, source_sentence, representation):
+    def generate(self, source_sentence, representation,
+                 src_selector_rep, trg_selector_rep):
+
+        n_steps = source_sentence.shape[1]
+        batch_size = source_sentence.shape[0]
+        attended_mask = tensor.ones(source_sentence.shape).T
+
         return self.sequence_generator.generate(
-            n_steps=2 * source_sentence.shape[1],
-            batch_size=source_sentence.shape[0],
-            attended=representation,
-            attended_mask=tensor.ones(source_sentence.shape).T,
+            n_steps=2 * n_steps,
+            batch_size=batch_size,
+            attended_0=representation,
+            attended_1=src_selector_rep,
+            attended_2=trg_selector_rep,
+            attended_mask=attended_mask,
             glimpses=self.attention.take_glimpses.outputs[0])
 
 
-def main(config, tr_stream, dev_stream):
+def main(config, tr_stream, dev_streams):
 
     # Create Theano variables
+    # Training
     src_selector = tensor.vector('src_selector', dtype=theano.config.floatX)
     trg_selector = tensor.vector('trg_selector', dtype=theano.config.floatX)
-    source_sentences = [tensor.lmatrix('source_0'), tensor.lmatrix('source_1')]
-    source_masks = [tensor.matrix('source_0_mask'), tensor.matrix('source_1_mask')]
+    source_sentence = tensor.lmatrix('source')
+    source_mask = tensor.matrix('source_mask')
     target_sentence = tensor.lmatrix('target')
     target_sentence_mask = tensor.matrix('target_mask')
 
-    '''
-    theano.config.compute_test_value = 'warn'
-    src_selector.tag.test_value = numpy.asarray([1, 0]).astype('float32')
-    trg_selector.tag.test_value = numpy.asarray([1,]).astype('float32')
-    source_sentences[0].tag.test_value = numpy.random.randint(10, size=(10, 12))
-    source_sentences[1].tag.test_value = numpy.random.randint(10, size=(10, 22))
-    source_masks[0].tag.test_value = \
-        numpy.random.rand(10, 12).astype('float32')
-    source_masks[0].tag.test_value = \
-        numpy.zeros((10, 12)).astype('float32')
-    target_sentence.tag.test_value = numpy.random.randint(10, size=(10, 14))
-    target_sentence_mask.tag.test_value = \
-        numpy.random.rand(10, 14).astype('float32')
-    '''
+    # Sampling
+    sampling_input = tensor.lmatrix('input')
+    sampling_mask = tensor.ones(sampling_input.shape)
+    sampling_src_sel = tensor.vector('sampling_src_sel',
+                                     dtype=theano.config.floatX)
+    sampling_trg_sel = tensor.vector('sampling_trg_sel',
+                                     dtype=theano.config.floatX)
+
+    # Currently the nhids of all encoders should be same
+    assert len(set([config['enc_nhids_%d' % ii]
+                    for ii in xrange(config['num_encs'])])) == 1,\
+        "All encoders should have the same hidden size!"
 
     # Construct model
-    multi_encoder = MultiEncoder(config)
-    decoder = Decoder(vocab_size=config['trg_vocab_size'],
-                      embedding_dim=config['dec_embed'],
-                      state_dim=config['dec_nhids'],
-                      representation_dim=config['representation_dim'],
-                      src_selector_rep=src_selector,
-                      trg_selector_rep=trg_selector,
-                      src_rep_dim=config['src_rep_dim'],
-                      trg_rep_dim=config['trg_rep_dim'],
-                      num_encs=config['num_encs'])
-    representation, src_mask, src_selector_rep, trg_selector_rep =\
-        multi_encoder.apply(source_sentences, source_masks,
-                            src_selector, trg_selector)
+    multi_encoder = MultiEncoder(
+        num_encs=config['num_encs'],
+        num_decs=config['num_decs'],
+        representation_dim=config['representation_dim'],
+        src_vocab_sizes=[config['src_vocab_size_%d' % ii]
+                         for ii in xrange(config['num_encs'])],
+        enc_embed_sizes=[config['enc_embed_%d' % ii]
+                         for ii in xrange(config['num_encs'])],
+        enc_nhids=[config['enc_nhids_%d' % ii]
+                   for ii in xrange(config['num_encs'])])
+    decoder = Decoder(
+        vocab_size=config['trg_vocab_size'],
+        embedding_dim=config['dec_embed'],
+        state_dim=config['dec_nhids'],
+        representation_dim=config['representation_dim'],
+        src_selector_rep=src_selector,
+        trg_selector_rep=trg_selector,
+        num_encs=config['num_encs'],
+        num_decs=config['num_decs'])
 
-    cost = decoder.cost(
-        representation, src_mask, target_sentence, target_sentence_mask,
-        src_selector_rep, trg_selector_rep)
+    # Get costs from each encoder sources
+    costs = []
+    for i in xrange(config['num_encs']):
+        representation, src_selector_rep, trg_selector_rep =\
+            multi_encoder.apply(source_sentence, source_mask,
+                                src_selector, trg_selector, i)
+        costs.append(
+            decoder.cost(
+                representation, source_mask,
+                target_sentence, target_sentence_mask,
+                src_selector_rep, trg_selector_rep))
+        costs[i].name += "_{}".format(i)
 
     # Initialize model
     multi_encoder.weights_init = IsotropicGaussian(config['weight_scale'])
     multi_encoder.biases_init = Constant(0)
     multi_encoder.push_initialization_config()
-    for i, _ in enumerate(source_sentences):
+    for i in xrange(config['num_encs']):
         multi_encoder.encoders[i].bidir.prototype.weights_init = Orthogonal()
     multi_encoder.initialize()
     decoder.weights_init = IsotropicGaussian(config['weight_scale'])
@@ -825,14 +836,31 @@ def main(config, tr_stream, dev_stream):
     decoder.transition.weights_init = Orthogonal()
     decoder.initialize()
 
-    cg = ComputationGraph(cost)
+    # Get computation graphs
+    cgs = []
+    for i in xrange(config['num_encs']):
+        cgs.append(ComputationGraph(costs[i]))
 
-    # Print shapes
-    shapes = [param.get_value().shape for param in cg.parameters]
-    logger.info("Parameter shapes: ")
-    for shape, count in Counter(shapes).most_common():
-        logger.info('    {:15}: {}'.format(shape, count))
-    logger.info("Total number of parameters: {}".format(len(shapes)))
+        # Print shapes
+        shapes = [param.get_value().shape for param in cgs[i].parameters]
+        logger.info("Parameter shapes for computation graph[{}]".format(i))
+        for shape, count in Counter(shapes).most_common():
+            logger.info('    {:15}: {}'.format(shape, count))
+        logger.info(
+            "Total number of parameters for computation graph[{}]: {}"
+            .format(i, len(shapes)))
+
+        logger.info("Parameter names for computation graph[{}]: ".format(i))
+        enc_dec_param_dict = merge(
+            Selector(multi_encoder.encoders[i]).get_params(),
+            Selector(multi_encoder.annotation_embedders[i]).get_params(),
+            Selector(multi_encoder.src_selector_embedder).get_params(),
+            Selector(multi_encoder.trg_selector_embedder).get_params(),
+            Selector(decoder).get_params())
+        for name, value in enc_dec_param_dict.iteritems():
+            logger.info('    {:15}: {}'.format(value.get_value().shape, name))
+        logger.info("Total number of parameters for computation graph[{}]: {}"
+                    .format(i, len(enc_dec_param_dict)))
 
     # Print parameter names
     enc_dec_param_dict = merge(Selector(multi_encoder).get_params(),
@@ -842,56 +870,106 @@ def main(config, tr_stream, dev_stream):
         logger.info('    {:15}: {}'.format(value.get_value().shape, name))
     logger.info("Total number of parameters: {}".format(len(enc_dec_param_dict)))
 
-    # This block evaluates the encoder annotations
-    f = theano.function(inputs=source_sentences + source_masks +\
-                               [src_selector, trg_selector],
-                        outputs=[representation, src_mask, src_selector_rep,
-                                trg_selector_rep])
-    s1 = numpy.random.randint(10, size=(10, 20))
-    s2 = numpy.random.randint(10, size=(10, 30))
-    m1 = numpy.random.rand(10, 20).astype('float32')
-    m2 = numpy.random.rand(10, 30).astype('float32')
-    rep_ = f(s1, s2, m1, m2, [1, 0],[1,])[0]  # this should be of size (20,10,200)
-    rep_ = f(s1, s2, m1, m2, [0, 1],[1,])[0]  # this should be of size (30,10,200)
+    # Exclude additional parameters from training if any
+    # TODO: create exclude list and use it for training_params
+    excluded_params = []
+    if 'additional_excludes' in config:
+        for i in xrange(config['num_encs']):
+            pass
 
-    rep_, s_mask, s_rep, t_rep = f(s1, s2, m1, m2, [1, 0], [1,])  # this should be of size (20,10,200)
-
-
-    # This block checks the decoder output
-    g = theano.function
-
+    # Exclude encoder parameters from training
+    training_params = []
+    if 'exclude_encs' in config:
+        assert config['num_encs'] == len(config['exclude_encs']), \
+            "Erroneous config::[num_encs] should match [exclude_encs]"
+        for i in xrange(config['num_encs']):
+            p_enc = Selector(multi_encoder.encoders[i]).get_params()
+            training_params.append(
+                [p for p in cgs[i].parameters
+                    if not any([pp == p for pp in p_enc.values()])])
 
     # Set up training algorithm
-    algorithm = GradientDescent(
-        cost=cost, params=cg.parameters,
-        step_rule=CompositeRule([StepClipping(config['step_clipping']),
-                                 eval(config['step_rule'])()])
-    )
+    algorithm = GradientDescentWithMultiCG(
+        costs=costs, params=training_params,
+        step_rule=CompositeRule(
+            [StepClippingWithRemoveNotFinite(threshold=config['step_clipping']),
+             eval(config['step_rule'])(learning_rate=config['learning_rate'])]))
 
     # Set up training model
-    training_model = Model(cost)
+    training_models = []
+    for i in xrange(config['num_encs']):
+        training_models.append(Model(costs[i]))
 
     # Set extensions
     extensions = [
-        TrainingDataMonitoring([cost], after_batch=True),
+        TrainingDataMonitoringWithMultiCG(costs, after_batch=True),
         Printing(after_batch=True),
-        stream_fide_en.PrintMultiStream(after_batch=True),
-        Plot('FiDe-En', channels=[['decoder_cost_cost']],
-             after_batch=True),
-        Dump(config['saveto'], every_n_batches=config['save_freq'])
-    ]
+        multi_stream.PrintMultiStream(after_batch=True),
+        DumpWithMultiCG(state_path=config['saveto'],
+                        every_n_batches=config['save_freq'])]
+
+    # Set up beam search and sampling computation graphs
+    for i in xrange(config['num_encs']):
+
+        # Compute annotations from one of the encoders
+        sampling_rep, src_selector_rep, trg_selector_rep =\
+            multi_encoder.apply(sampling_input, sampling_mask,
+                                sampling_src_sel, sampling_trg_sel, i)
+
+        # Get sampling computation graph
+        generated = decoder.generate(sampling_input, sampling_rep,
+                                     src_selector_rep, trg_selector_rep)
+
+        # Filter the output variable that corresponds to the sample
+        samples, = VariableFilter(
+            bricks=[decoder.sequence_generator], name="outputs")(
+                ComputationGraph(generated[1]))  # generated[1] is the next_outputs
+
+        # Create a model for the computation graph
+        sampling_model = Model(generated)
+
+        # Add sampling for multi encoder
+        extensions.append(Sampler(
+            sampling_model, tr_stream, num_samples=config['hook_samples'],
+            enc_id=i, every_n_batches=config['sampling_freq']))
+
+        # Add bleu validator for multi encoder, except for the identical
+        # mapping languages such as english-to-english computation graph
+        if config['src_data_%d' % i] != config['trg_data_%d' % i]:
+            extensions.append(BleuValidator(
+                sampling_input, samples, sampling_model, dev_streams[i],
+                src_selector=sampling_src_sel, trg_selector=sampling_trg_sel,
+                src_vocab_size=config['src_vocab_size_%d' % i],
+                bleu_script=config['bleu_script'],
+                val_set_out=config['val_set_out_%d' % i],
+                val_set_grndtruth=config['val_set_grndtruth_%d' % i],
+                beam_size=config['beam_size'],
+                val_burn_in=config['val_burn_in'],
+                enc_id=i, saveto=config['saveto'],
+                every_n_batches=config['bleu_val_freq']))
+
+    # Reload model if necessary
+    if config['reload']:
+        extensions.append(LoadFromDumpMultiCG(config['saveto']))
+
+    if config['plot']:
+        extensions.append(
+            Plot(config['stream'],
+                 channels=[['decoder_cost_cost_%d' % i]
+                           for i in xrange(config['num_encs'])],
+                 server_url="http://127.0.0.1:{}".format(config['bokeh_port']),
+                 after_batch=True))
 
     # Reload model if necessary
     if config['reload']:
         extensions += [LoadFromDumpWMT15(config['saveto'])]
 
     # Initialize main loop
-    main_loop = MainLoop(
-        model=training_model,
+    main_loop = MainLoopWithMultiCG(
+        models=training_models,
         algorithm=algorithm,
         data_stream=tr_stream,
-        extensions=extensions
-    )
+        extensions=extensions)
 
     # Train!
     main_loop.run()
@@ -900,5 +978,5 @@ def main(config, tr_stream, dev_stream):
 if __name__ == "__main__":
     logger.info("Model options:\n{}".format(pprint.pformat(config)))
     tr_stream = streams[config['stream']].multi_enc_stream
-    main(config, tr_stream, None)
-
+    dev_streams = streams[config['stream']].dev_streams
+    main(config, tr_stream, dev_streams)

@@ -1,11 +1,11 @@
 # This is the RNNsearch model
 # Works with https://github.com/orhanf/blocks/tree/wmt15
 # 0e23b0193f64dc3e56da18605d53d6f5b1352848
-from collections import Counter
 import argparse
 import logging
 import pprint
 import theano
+from collections import Counter
 from theano import tensor
 from toolz import merge
 from picklable_itertools.extras import equizip
@@ -35,7 +35,6 @@ from blocks.bricks.sequence_generators import (
     LookupFeedback, Readout, SoftmaxEmitter,
     SequenceGenerator
 )
-from blocks.select import Selector
 
 import config
 import stream
