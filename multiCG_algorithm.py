@@ -161,3 +161,61 @@ class GradientDescentWithMultiCG(object):
         cg_id = numpy.argmax(batch['src_selector'])
         ordered_batch = [batch[v.name] for v in self.algorithms[cg_id].inputs]
         self._functions[cg_id](*ordered_batch)
+
+
+class GradientDescentWithMultiCGandMonitors(object):
+
+    def __init__(self, costs, params, step_rule, **kwargs):
+        self.num_cgs = len(costs)
+        self.algorithms = []
+        self._functions = []
+        self.retvals = [dict() for _ in xrange(self.num_cgs)]
+
+        for i in xrange(len(costs)):
+            self.algorithms.append(
+                GradientDescent(
+                    cost=costs[i], params=params[i],
+                    step_rule=step_rule))
+
+    def initialize(self):
+
+        # Check if both computation graphs have identical inputs
+        inputs = set.intersection(
+            *[set(self.algorithms[i].inputs)
+                for i in xrange(self.num_cgs)])
+        if not all(
+                [set(self.algorithms[i].inputs) == inputs
+                    for i in xrange(self.num_cgs)]):
+            raise ValueError(
+                "mismatch of input names between computation graphs")
+
+        for i in xrange(self.num_cgs):
+            logger.info("Initializing the training algorithm {}".format(i))
+            all_updates = self.algorithms[i].updates
+            for param in self.algorithms[i].params:
+                all_updates.append(
+                    (param, param - self.algorithms[i].steps[param]))
+            all_updates += self.algorithms[i].step_rule_updates
+            self._functions.append(theano.function(
+                self.algorithms[i].inputs,
+                [self.algorithms[i].cost,
+                 self.algorithms[i].total_gradient_norm,
+                 self.algorithms[i].total_step_norm], updates=all_updates))
+            logger.info("The training algorithm {} is initialized".format(i))
+
+    def process_batch(self, batch):
+        for i in xrange(self.num_cgs):
+            if not set(batch.keys()) == set(
+                    [v.name for v in self.algorithms[i].inputs]):
+                raise ValueError(
+                    "mismatch of variable names and data sources" +
+                    variable_mismatch_error.format(
+                        sources=batch.keys(),
+                        variables=[v.name for v in
+                                   self.algorithms[i].inputs]))
+        cg_id = numpy.argmax(batch['src_selector'])
+        ordered_batch = [batch[v.name] for v in self.algorithms[cg_id].inputs]
+        rvals = self._functions[cg_id](*ordered_batch)
+        self.retvals[cg_id]['cost'] = float(rvals[0])
+        self.retvals[cg_id]['total_gradient_norm'] = float(rvals[1])
+        self.retvals[cg_id]['total_step_norm'] = float(rvals[2])

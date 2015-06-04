@@ -15,7 +15,7 @@ from blocks.filter import VariableFilter
 from blocks.model import Model
 from blocks.graph import ComputationGraph
 from blocks.initialization import IsotropicGaussian, Orthogonal, Constant
-from blocks.extensions import Printing
+from blocks.extensions import Printing, FinishAfter
 from blocks.extensions.plot import Plot
 
 from blocks.bricks import (Tanh, Maxout, Linear, FeedforwardSequence,
@@ -33,17 +33,20 @@ from blocks.bricks.sequence_generators import (
     LookupFeedback, Readout, SoftmaxEmitter,
     BaseSequenceGenerator
 )
-from blocks.utils import (dict_union, dict_subset, shared_floatx_nans)
+from blocks.utils import (
+    dict_union, dict_subset, shared_floatx_nans, named_copy)
 
 import config
-import multi_stream
+import multiCG_stream
 
 from multiCG_algorithm import (GradientDescentWithMultiCG,
+                               GradientDescentWithMultiCGandMonitors,
                                StepClippingWithRemoveNotFinite,
                                MainLoopWithMultiCG)
 from multiCG_extensions import (TrainingDataMonitoringWithMultiCG,
                                 DumpWithMultiCG,
-                                LoadFromDumpMultiCG)
+                                LoadFromDumpMultiCG,
+                                SimpleTrainingDataMonitoringWithMultiCG)
 from sampling import Sampler, BleuValidator
 
 logger = logging.getLogger(__name__)
@@ -59,47 +62,8 @@ args = parser.parse_args()
 config = getattr(config, args.proto)()
 
 # dictionary mapping stream name to stream getters
-streams = {'fide-en': multi_stream,
-           'fideen-en': multi_stream}
-
-
-class MainLoopDumpManagerWMT15(MainLoopDumpManager):
-
-    def load_to(self, main_loop):
-        """Loads the dump from the root folder into the main loop.
-
-        Only difference from super().load_to is the exception handling
-        for each step separately.
-        """
-        try:
-            logger.info("Loading model parameters...")
-            params = self.load_parameters()
-            main_loop.model.set_param_values(params)
-            for p, v in params.iteritems():
-                logger.info("Loaded {:15}: {}".format(v.shape, p))
-            logger.info("Number of parameters loaded: {}".format(len(params)))
-        except Exception as e:
-            logger.error("Error {0}".format(str(e)))
-
-        try:
-            logger.info("Loading iteration state...")
-            main_loop.iteration_state = self.load_iteration_state()
-        except Exception as e:
-            logger.error("Error {0}".format(str(e)))
-
-        try:
-            logger.info("Loading log...")
-            main_loop.log = self.load_log()
-        except Exception as e:
-            logger.error("Error {0}".format(str(e)))
-
-
-class LoadFromDumpWMT15(LoadFromDump):
-    """Wrapper to use MainLoopDumpManagerWMT15"""
-
-    def __init__(self, config_path, **kwargs):
-        super(LoadFromDumpWMT15, self).__init__(config_path, **kwargs)
-        self.manager = MainLoopDumpManagerWMT15(config_path)
+streams = {'fide-en': multiCG_stream,
+           'fideen-en': multiCG_stream}
 
 
 # Helper class
@@ -784,11 +748,6 @@ def main(config, tr_stream, dev_streams):
     sampling_trg_sel = tensor.vector('sampling_trg_sel',
                                      dtype=theano.config.floatX)
 
-    # Currently the nhids of all encoders should be same
-    assert len(set([config['enc_nhids_%d' % ii]
-                    for ii in xrange(config['num_encs'])])) == 1,\
-        "All encoders should have the same hidden size!"
-
     # Construct model
     multi_encoder = MultiEncoder(
         num_encs=config['num_encs'],
@@ -871,11 +830,18 @@ def main(config, tr_stream, dev_streams):
     logger.info("Total number of parameters: {}".format(len(enc_dec_param_dict)))
 
     # Exclude additional parameters from training if any
-    # TODO: create exclude list and use it for training_params
-    excluded_params = []
+    excluded_params = [list() for _ in xrange(len(cgs))]
     if 'additional_excludes' in config:
+
+        # Get parameters to exclude first
+        pex = [enc_dec_param_dict[p] for p in config['additional_excludes']
+               if p in enc_dec_param_dict]
+
+        # Put parameter into exclude list
         for i in xrange(config['num_encs']):
-            pass
+            for p in pex:
+                if p in cgs[i].parameters:
+                    excluded_params[i].append(p)
 
     # Exclude encoder parameters from training
     training_params = []
@@ -886,7 +852,20 @@ def main(config, tr_stream, dev_streams):
             p_enc = Selector(multi_encoder.encoders[i]).get_params()
             training_params.append(
                 [p for p in cgs[i].parameters
-                    if not any([pp == p for pp in p_enc.values()])])
+                    if (not any([pp == p for pp in p_enc.values()])) and
+                       (p not in excluded_params[i])])
+
+    # Print which parameters are excluded
+    for i in xrange(config['num_encs']):
+        excluded_all = list(set(cgs[i].parameters) - set(training_params[i]))
+        for p in excluded_all:
+            logger.info(
+                'Excluding from training of CG[{}]: [{}]'
+                .format(i, [key for key, val in enc_dec_param_dict.iteritems()
+                            if val == p][0]))
+        logger.info(
+            'Total number of excluded parameters for CG[{}]: [{}]'
+            .format(i, len(excluded_all)))
 
     # Set up training algorithm
     algorithm = GradientDescentWithMultiCG(
@@ -900,11 +879,28 @@ def main(config, tr_stream, dev_streams):
     for i in xrange(config['num_encs']):
         training_models.append(Model(costs[i]))
 
+    # Set observables for monitoring
+    observables = []
+    for i in xrange(len(cgs)):
+        """
+        (energies,) = VariableFilter(
+            applications=[decoder.sequence_generator.readout.readout],
+            name_regex="output")(cgs[i].variables)
+        min_energy = named_copy(energies.min(), "min_energy")
+        max_energy = named_copy(energies.max(), "max_energy")
+
+        observables.append(
+            [costs[i], algorithm.algorithms[i].total_step_norm,
+             algorithm.algorithms[i].total_gradient_norm])
+        """
+        observables.append(costs[i])
+
     # Set extensions
     extensions = [
-        TrainingDataMonitoringWithMultiCG(costs, after_batch=True),
+        #FinishAfter(after_n_batches=200),
+        TrainingDataMonitoringWithMultiCG(observables, after_batch=True),
         Printing(after_batch=True),
-        multi_stream.PrintMultiStream(after_batch=True),
+        multiCG_stream.PrintMultiStream(after_batch=True),
         DumpWithMultiCG(state_path=config['saveto'],
                         every_n_batches=config['save_freq'])]
 
@@ -959,10 +955,6 @@ def main(config, tr_stream, dev_streams):
                            for i in xrange(config['num_encs'])],
                  server_url="http://127.0.0.1:{}".format(config['bokeh_port']),
                  after_batch=True))
-
-    # Reload model if necessary
-    if config['reload']:
-        extensions += [LoadFromDumpWMT15(config['saveto'])]
 
     # Initialize main loop
     main_loop = MainLoopWithMultiCG(

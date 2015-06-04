@@ -178,7 +178,8 @@ def get_config_wmt15_fideen_en():
     config['weight_scale'] = 0.01
     config['schedule'] = [24, 24, 12]
     config['exclude_encs'] = [True, True, False]
-    config['additional_exludes'] = ['']
+    config['additional_excludes'] = \
+        ['/decoder/sequencegeneratorwithmulticontext/readout/lookupfeedbackwmt15/lookuptable.W']
 
     # Regularization related
     config['weight_noise_ff'] = False
@@ -194,8 +195,8 @@ def get_config_wmt15_fideen_en():
     config['src_data_0'] = basedir + 'fi2en/all.tok.clean.seg.shuf2.fi-en.fi'
     config['src_data_1'] = basedir + 'de2en/all.tok.clean.shuf.split.de-en.de'
     config['src_data_2'] = basedir + 'cs2en/all.tok.clean.shuf.cs-en.en'
-    config['src_vocab_size_0'] = 40000
-    config['src_vocab_size_1'] = 40000
+    config['src_vocab_size_0'] = 40001
+    config['src_vocab_size_1'] = 200000
     config['src_vocab_size_2'] = 40000
 
     config['trg_vocab'] = basedir + 'joint_vocab.sub.en.52k.pkl'
@@ -220,10 +221,10 @@ def get_config_wmt15_fideen_en():
 
     # Timing related
     config['reload'] = True
-    config['save_freq'] = 1
+    config['save_freq'] = 2000
     config['sampling_freq'] = 13
     config['bleu_val_freq'] = 5000
-    config['val_burn_in'] = 40000
+    config['val_burn_in'] = 20000
 
     # Monitoring related
     config['hook_samples'] = 2
@@ -232,3 +233,34 @@ def get_config_wmt15_fideen_en():
 
     #return ReadOnlyDict(config)
     return config
+
+
+def get_config_wmt15_fideen_en_TEST():
+
+    config = get_config_wmt15_fideen_en()
+
+    config['enc_nhids_0'] = 100
+    config['enc_nhids_1'] = 100
+    config['enc_nhids_2'] = 100
+    config['dec_nhids'] = 100
+    config['enc_embed_0'] = 62
+    config['enc_embed_1'] = 62
+    config['enc_embed_2'] = 62
+    config['dec_embed'] = 62
+    config['representation_dim'] = 200
+    config['saveto'] = 'multiEnc_FIDEEN_multiCG_fast_TEST'
+
+    config['src_vocab_size_0'] = 400
+    config['src_vocab_size_1'] = 400
+    config['src_vocab_size_2'] = 400
+    config['trg_vocab_size'] = 515
+
+    # Optimization related
+    config['batch_size_enc_0'] = 8
+    config['batch_size_enc_1'] = 8
+    config['batch_size_enc_2'] = 8
+    config['sort_k_batches'] = 12
+    config['schedule'] = [4, 4, 2]
+
+    return config
+

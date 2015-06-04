@@ -70,7 +70,6 @@ class MultiEncStream(Transformer, six.Iterator):
         return self
 
     def __next__(self):
-        import ipdb;ipdb.set_trace()
         batch = self._get_batch_with_reset(
             self.epoch_iterators[self.curr_id])
         self._add_selectors(batch, self.curr_id)

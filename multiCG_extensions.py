@@ -50,7 +50,10 @@ class TrainingDataMonitoringWithMultiCG(SimpleExtension, MonitoringExtension):
         self._buffers = []
         for i in xrange(num_cgs):
             self._buffers.append(
-                AggregationBuffer([variables[i]], use_take_last=True))
+                AggregationBuffer(variables[i]
+                                  if isinstance(variables[i], list)
+                                  else [variables[i]],
+                                  use_take_last=True))
         self._last_time_called = -1
 
     def do(self, callback_name, *args):
@@ -75,6 +78,25 @@ class TrainingDataMonitoringWithMultiCG(SimpleExtension, MonitoringExtension):
             self._buffers[enc_id].initialize_aggregators()
 
 
+class SimpleTrainingDataMonitoringWithMultiCG(SimpleExtension,
+                                              MonitoringExtension):
+
+    def __init__(self, **kwargs):
+        super(SimpleTrainingDataMonitoringWithMultiCG, self).__init__(**kwargs)
+        self._last_time_called = -1
+
+    def do(self, callback_name, *args):
+        if (self.main_loop.status['iterations_done'] ==
+                self._last_time_called):
+            raise Exception("TrainingDataMonitoring.do should be invoked"
+                            " no more than once per iteration")
+        self._last_time_called = self.main_loop.status['iterations_done']
+        enc_id = numpy.argmax(args[0]['src_selector'])
+        self.add_records(
+            self.main_loop.log,
+            self.main_loop.algorithm.retvals[enc_id].items())
+
+
 class MainLoopDumpManagerWMT15(MainLoopDumpManager):
 
     def load_to(self, main_loop):
@@ -96,9 +118,8 @@ class MainLoopDumpManagerWMT15(MainLoopDumpManager):
                         logger.info("Loaded to CG[{}] {:15}: {}"
                                     .format(i, val.shape, pname))
                     else:
-                        logger.error(
-                            "Error loading {}, parameter does not exist"
-                            .format(pname))
+                        logger.warning(
+                            "Parameter does not exist: {}".format(pname))
 
                 logger.info(
                     "Number of parameters loaded for computation graph[{}]: {}"
