@@ -830,6 +830,7 @@ def main(config, tr_stream, dev_streams):
     logger.info("Total number of parameters: {}".format(len(enc_dec_param_dict)))
 
     # Exclude additional parameters from training if any
+    # Note that, additional excludes are excluded from all computatinal graphs
     excluded_params = [list() for _ in xrange(len(cgs))]
     if 'additional_excludes' in config:
 
@@ -849,11 +850,15 @@ def main(config, tr_stream, dev_streams):
         assert config['num_encs'] == len(config['exclude_encs']), \
             "Erroneous config::[num_encs] should match [exclude_encs]"
         for i in xrange(config['num_encs']):
-            p_enc = Selector(multi_encoder.encoders[i]).get_params()
-            training_params.append(
-                [p for p in cgs[i].parameters
-                    if (not any([pp == p for pp in p_enc.values()])) and
-                       (p not in excluded_params[i])])
+            if config['exclude_encs'][i]:
+                p_enc = Selector(multi_encoder.encoders[i]).get_params()
+                training_params.append(
+                    [p for p in cgs[i].parameters
+                        if (not any([pp == p for pp in p_enc.values()])) and
+                           (p not in excluded_params[i])])
+            else:
+                training_params.append([p for p in cgs[i].parameters
+                                        if p not in excluded_params[i]])
 
     # Print which parameters are excluded
     for i in xrange(config['num_encs']):
