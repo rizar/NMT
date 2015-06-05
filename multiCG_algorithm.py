@@ -114,10 +114,18 @@ class MainLoopWithMultiCG(MainLoop):
 
 class GradientDescentWithMultiCG(object):
 
-    def __init__(self, costs, params, step_rule, **kwargs):
+    def __init__(self, costs, params, step_rule, drop_input=None, **kwargs):
         self.num_cgs = len(costs)
         self.algorithms = []
         self._functions = []
+        self.drop_input = drop_input
+
+        if drop_input is None:
+            self.drop_input = [0.0 for _ in xrange(self.num_cgs)]
+
+        if len(self.drop_input) != self.num_cgs:
+            raise ValueError(
+                "drop input must be specified for each CG, eg.[0., 0., 0.5]")
 
         for i in xrange(len(costs)):
             self.algorithms.append(
@@ -159,6 +167,16 @@ class GradientDescentWithMultiCG(object):
                         variables=[v.name for v in
                                    self.algorithms[i].inputs]))
         cg_id = numpy.argmax(batch['src_selector'])
+
+        # Apply input replacement with <UNK> if necessary
+        if self.drop_input[cg_id] > 0.0:
+            num_els = numpy.prod(batch['source'].shape)
+            num_reps = max(1, int(num_els * self.drop_input[cg_id]))
+            replace_idx = numpy.random.choice(num_els, num_reps, replace=False)
+            # TODO: set it according to unk_id in config
+            batch['source'][numpy.unravel_index(
+                replace_idx, batch['source'].shape)] = 1
+
         ordered_batch = [batch[v.name] for v in self.algorithms[cg_id].inputs]
         self._functions[cg_id](*ordered_batch)
 

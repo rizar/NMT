@@ -187,6 +187,7 @@ def get_config_wmt15_fideen_en():
     config['weight_noise_ff'] = False
     config['weight_noise_rec'] = False
     config['dropout'] = 1.0
+    config['drop_input'] = [0., 0., 0.1]
 
     # Vocabulary/dataset related
     basedir = '/data/lisatmp3/firatorh/nmt/wmt15/data/fideen-en/'
@@ -258,17 +259,21 @@ def get_config_wmt15_fideen_en_TEST():
     config['src_vocab_size_2'] = 400
     config['trg_vocab_size'] = 515
 
+    # Regularization related
+    config['drop_input'] = [0.4, 0.7, 0.2]
+
     # Optimization related
     config['batch_size_enc_0'] = 8
     config['batch_size_enc_1'] = 8
     config['batch_size_enc_2'] = 8
     config['sort_k_batches'] = 12
-    config['schedule'] = [4, 4, 2]
+    config['schedule'] = [1, 1, 1]
 
     # Timing related
     config['save_freq'] = 5
     config['finish_after'] = 10
     config['load_accumulators'] = False
+    config['save_accumulators'] = False
 
     return config
 

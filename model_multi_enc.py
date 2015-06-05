@@ -874,7 +874,7 @@ def main(config, tr_stream, dev_streams):
 
     # Set up training algorithm
     algorithm = GradientDescentWithMultiCG(
-        costs=costs, params=training_params,
+        costs=costs, params=training_params, drop_input=config['drop_input'],
         step_rule=CompositeRule(
             [StepClippingWithRemoveNotFinite(threshold=config['step_clipping']),
              eval(config['step_rule'])(learning_rate=config['learning_rate'])]))
