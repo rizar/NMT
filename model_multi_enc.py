@@ -885,28 +885,16 @@ def main(config, tr_stream, dev_streams):
         training_models.append(Model(costs[i]))
 
     # Set observables for monitoring
-    observables = []
-    for i in xrange(len(cgs)):
-        """
-        (energies,) = VariableFilter(
-            applications=[decoder.sequence_generator.readout.readout],
-            name_regex="output")(cgs[i].variables)
-        min_energy = named_copy(energies.min(), "min_energy")
-        max_energy = named_copy(energies.max(), "max_energy")
-
-        observables.append(
-            [costs[i], algorithm.algorithms[i].total_step_norm,
-             algorithm.algorithms[i].total_gradient_norm])
-        """
-        observables.append(costs[i])
+    observables = costs
 
     # Set extensions
     extensions = [
-        #FinishAfter(after_n_batches=200),
+        FinishAfter(after_n_batches=config['finish_after']),
         TrainingDataMonitoringWithMultiCG(observables, after_batch=True),
         Printing(after_batch=True),
         multiCG_stream.PrintMultiStream(after_batch=True),
-        DumpWithMultiCG(state_path=config['saveto'],
+        DumpWithMultiCG(saveto=config['saveto'],
+                        save_accumulators=config['save_accumulators'],
                         every_n_batches=config['save_freq'])]
 
     # Set up beam search and sampling computation graphs
@@ -951,7 +939,9 @@ def main(config, tr_stream, dev_streams):
 
     # Reload model if necessary
     if config['reload']:
-        extensions.append(LoadFromDumpMultiCG(config['saveto']))
+        extensions.append(
+            LoadFromDumpMultiCG(saveto=config['saveto'],
+                                load_accumulators=config['load_accumulators']))
 
     if config['plot']:
         extensions.append(

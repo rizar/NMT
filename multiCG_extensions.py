@@ -3,6 +3,7 @@ import logging
 import numpy
 import os
 import re
+import time
 
 from toolz import merge
 
@@ -99,12 +100,18 @@ class SimpleTrainingDataMonitoringWithMultiCG(SimpleExtension,
 
 class MainLoopDumpManagerWMT15(MainLoopDumpManager):
 
-    def load_to(self, main_loop):
-        """Loads the dump from the root folder into the main loop.
+    def __init__(self, saveto, save_accumulators=False,
+                 load_accumulators=False):
+        super(MainLoopDumpManagerWMT15, self).__init__(saveto)
+        self.save_accumulators = save_accumulators
+        self.load_accumulators = load_accumulators
 
-        Only difference from super().load_to is the exception handling
-        for each step separately.
-        """
+    @property
+    def path_to_accumulators(self):
+        return os.path.join(self.folder, 'algo{}.npz')
+
+    def load_to(self, main_loop):
+        """Loads the dump from the root folder into the main loop."""
         try:
             logger.info("Loading model parameters...")
             params_all = self.load_parameters()
@@ -139,6 +146,13 @@ class MainLoopDumpManagerWMT15(MainLoopDumpManager):
         except Exception as e:
             logger.error("Error {0}".format(str(e)))
 
+        if self.load_accumulators:
+            try:
+                logger.info("Loading algorithm accumulators...")
+                self._load_accumulators(main_loop)
+            except Exception as e:
+                logger.error("Error {0}".format(str(e)))
+
     def dump_parameters(self, main_loop):
         params_to_save = []
         for i in xrange(main_loop.num_cgs):
@@ -147,18 +161,89 @@ class MainLoopDumpManagerWMT15(MainLoopDumpManager):
         save_parameter_values(merge(params_to_save),
                               self.path_to_parameters)
 
+    def dump_accumulators(self, main_loop):
+        """Each step rule has different number of accumulators"""
+        for i in xrange(main_loop.num_cgs):
+            algo = main_loop.algorithm.algorithms[i]
+            accums = algo.step_rule_updates
+            params = algo.steps.items()
+            model_params = main_loop.models[i].get_params()
+
+            # Reshape this long list into (num_params, num_accums_per_param)
+            num_params = len(params)
+            num_accums = len(accums)
+            assert num_accums % num_params == 0, \
+                "Accumulators cannot be loaded for CG[{}]".format(i)
+
+            # This is num_accums_per_param
+            col = num_accums / num_params
+            accums_mat = [accums[col*l:col*(l+1)] for l in range(num_params)]
+            accums_vals = [[y[0].get_value() for y in x] for x in accums_mat]
+
+            # Get corresponding parameter names and create a dictionary
+            names = [[k for k, v in model_params.iteritems()
+                      if v == params[l][0]][0] for l in xrange(len(params))]
+            params_dict = dict([(names[l].replace("/", "-"), accums_vals[l])
+                                for l in xrange(len(names))])
+
+            # Save here
+            numpy.savez(self.path_to_accumulators.format(i), **params_dict)
+
+    def dump(self, main_loop):
+        """Overwrites MainLoopDumpManager.dump()."""
+        if not os.path.exists(self.folder):
+            os.mkdir(self.folder)
+        print ""
+        logger.info(" Saving model")
+        start = time.time()
+        logger.info(" ...saving parameters")
+        self.dump_parameters(main_loop)
+        logger.info(" ...saving iteration state")
+        self.dump_iteration_state(main_loop)
+        logger.info(" ...saving log")
+        self.dump_log(main_loop)
+        if self.save_accumulators:
+            logger.info(" ...saving algorithm")
+            self.dump_accumulators(main_loop)
+        logger.info(" Model saved, took {} seconds.".format(time.time()-start))
+
+    def _load_accumulators(self, main_loop):
+        """Nasty method, use carefully"""
+        for i in xrange(main_loop.num_cgs):
+            source = numpy.load(self.path_to_accumulators.format(i))
+            accums_dict = {name.replace("-", "/"): value
+                           for name, value in source.items()}
+            source.close()
+            algo = main_loop.algorithm.algorithms[i]
+            model_params = main_loop.models[i].get_params()
+            steps = algo.steps.items()
+
+            for pidx in xrange(len(steps)):
+                # Get parameter name and its accumulators
+                p = steps[pidx][0]
+                name = [k for k, v in model_params.iteritems() if v == p][0]
+                accums = accums_dict[name]
+
+                # This is num_accums_per_param
+                col = len(accums)
+                for aidx in xrange(col):
+                    algo.step_rule_updates[pidx*col+aidx][0].set_value(
+                        accums[aidx])
+
 
 class DumpWithMultiCG(Dump):
     """Wrapper to use MainLoopDumpManagerWMT15"""
-    def __init__(self, state_path, **kwargs):
+    def __init__(self, saveto, save_accumulators=False, **kwargs):
         kwargs.setdefault("after_training", True)
-        super(DumpWithMultiCG, self).__init__(state_path, **kwargs)
-        self.manager = MainLoopDumpManagerWMT15(state_path)
+        super(DumpWithMultiCG, self).__init__(saveto, **kwargs)
+        self.manager = MainLoopDumpManagerWMT15(
+            saveto, save_accumulators=save_accumulators)
 
 
 class LoadFromDumpMultiCG(LoadFromDump):
     """Wrapper to use MainLoopDumpManagerWMT15"""
 
-    def __init__(self, config_path, **kwargs):
-        super(LoadFromDumpMultiCG, self).__init__(config_path, **kwargs)
-        self.manager = MainLoopDumpManagerWMT15(config_path)
+    def __init__(self, saveto, load_accumulators=False, **kwargs):
+        super(LoadFromDumpMultiCG, self).__init__(saveto, **kwargs)
+        self.manager = MainLoopDumpManagerWMT15(
+            saveto, load_accumulators=load_accumulators)

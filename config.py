@@ -177,6 +177,8 @@ def get_config_wmt15_fideen_en():
     config['step_clipping'] = 5
     config['weight_scale'] = 0.01
     config['schedule'] = [24, 24, 12]
+    config['save_accumulators'] = True  # algorithms' update step variables
+    config['load_accumulators'] = True  # be careful with this
     config['exclude_encs'] = [True, True, False]
     config['additional_excludes'] = \
         ['/decoder/sequencegeneratorwithmulticontext/readout/lookupfeedbackwmt15/lookuptable.W']
@@ -225,6 +227,7 @@ def get_config_wmt15_fideen_en():
     config['sampling_freq'] = 13
     config['bleu_val_freq'] = 5000
     config['val_burn_in'] = 20000
+    config['finish_after'] = 10000000
 
     # Monitoring related
     config['hook_samples'] = 2
@@ -261,6 +264,11 @@ def get_config_wmt15_fideen_en_TEST():
     config['batch_size_enc_2'] = 8
     config['sort_k_batches'] = 12
     config['schedule'] = [4, 4, 2]
+
+    # Timing related
+    config['save_freq'] = 5
+    config['finish_after'] = 10
+    config['load_accumulators'] = False
 
     return config
 
