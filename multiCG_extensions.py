@@ -112,8 +112,9 @@ class MainLoopDumpManagerWMT15(MainLoopDumpManager):
 
     def load_to(self, main_loop):
         """Loads the dump from the root folder into the main loop."""
+        logger.info(" Reloading model")
         try:
-            logger.info("Loading model parameters...")
+            logger.info(" ...loading model parameters")
             params_all = self.load_parameters()
             for i in xrange(main_loop.num_cgs):
                 params_this = main_loop.models[i].get_params()
@@ -121,37 +122,43 @@ class MainLoopDumpManagerWMT15(MainLoopDumpManager):
                 for pname in params_this.keys():
                     if pname in params_all:
                         val = params_all[pname]
+                        if params_this[pname].get_value().shape != val.shape:
+                            logger.warning(
+                                " Dimension mismatch {}-{} for {}"
+                                .format(params_this[pname].get_value().shape,
+                                        val.shape, pname))
+
                         params_this[pname].set_value(val)
-                        logger.info("Loaded to CG[{}] {:15}: {}"
+                        logger.info(" Loaded to CG[{}] {:15}: {}"
                                     .format(i, val.shape, pname))
                     else:
                         logger.warning(
-                            "Parameter does not exist: {}".format(pname))
+                            " Parameter does not exist: {}".format(pname))
 
                 logger.info(
-                    "Number of parameters loaded for computation graph[{}]: {}"
+                    " Number of parameters loaded for computation graph[{}]: {}"
                     .format(i, len(params_this) - len(missing)))
         except Exception as e:
-            logger.error("Error {0}".format(str(e)))
+            logger.error(" Error {0}".format(str(e)))
 
         try:
-            logger.info("Loading iteration state...")
+            logger.info(" Loading iteration state...")
             main_loop.iteration_state = self.load_iteration_state()
         except Exception as e:
-            logger.error("Error {0}".format(str(e)))
+            logger.error(" Error {0}".format(str(e)))
 
         try:
-            logger.info("Loading log...")
+            logger.info(" Loading log...")
             main_loop.log = self.load_log()
         except Exception as e:
-            logger.error("Error {0}".format(str(e)))
+            logger.error(" Error {0}".format(str(e)))
 
         if self.load_accumulators:
             try:
-                logger.info("Loading algorithm accumulators...")
+                logger.info(" Loading algorithm accumulators...")
                 self._load_accumulators(main_loop)
             except Exception as e:
-                logger.error("Error {0}".format(str(e)))
+                logger.error(" Error {0}".format(str(e)))
 
     def dump_parameters(self, main_loop):
         params_to_save = []
