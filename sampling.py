@@ -58,15 +58,9 @@ class Sampler(SimpleExtension, SamplingBase):
         self.trg_vocab = trg_vocab
         self.src_ivocab = src_ivocab
         self.trg_ivocab = trg_ivocab
-        self.is_synced = False
         self.sampling_fn = model.get_theano_function()
 
     def do(self, which_callback, *args):
-
-        # Get current model parameters
-        if not self.is_synced:
-            self.model.params = self.main_loop.model.params
-            self.is_synced = True
 
         # Get dictionaries, this may not be the practical way
         sources = self._get_attr_rec(self.main_loop, 'data_stream')
@@ -170,10 +164,6 @@ class BleuValidator(SimpleExtension, SamplingBase):
         if self.main_loop.status['iterations_done'] <= \
                 self.config['val_burn_in']:
             return
-
-        # Get current model parameters
-        self.model.set_param_values(
-            self.main_loop.model.get_param_values())
 
         # Evaluate and save if necessary
         self._save_model(self._evaluate_model())

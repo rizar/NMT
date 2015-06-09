@@ -35,7 +35,6 @@ from blocks.bricks.sequence_generators import (
     LookupFeedback, Readout, SoftmaxEmitter,
     SequenceGenerator
 )
-from blocks.select import Selector
 
 import config
 import stream
@@ -287,8 +286,6 @@ def main(config, tr_stream, dev_stream):
     cost = decoder.cost(encoder.apply(source_sentence, source_sentence_mask),
                         source_sentence_mask, target_sentence, target_sentence_mask)
 
-    cg = ComputationGraph(cost)
-
     # Initialize model
     encoder.weights_init = decoder.weights_init = IsotropicGaussian(config['weight_scale'])
     encoder.biases_init = decoder.biases_init = Constant(0)
@@ -315,8 +312,10 @@ def main(config, tr_stream, dev_stream):
         enc_params += Selector(encoder.back_fork).get_params().values()
         dec_params = Selector(decoder.sequence_generator.readout).get_params().values()
         dec_params += Selector(decoder.sequence_generator.fork).get_params().values()
-        dec_params += Selector(decoder.state_init).get_params().values()
+        dec_params += Selector(decoder.transition.initial_transformer).get_params().values()
         cg = apply_noise(cg, enc_params+dec_params, config['weight_noise_ff'])
+
+    cost = cg.outputs[0]
 
     # Print shapes
     shapes = [param.get_value().shape for param in cg.parameters]
