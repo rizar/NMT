@@ -206,7 +206,7 @@ class BleuValidator(SimpleExtension, SamplingBase):
                     trans_out = trans[best]
 
                     # convert idx to words
-                    trans_out = self._idx_to_word(trans_out, self.trg_ivocab)
+                    trans_out = self._idx_to_word(trans_out[:-1], self.trg_ivocab)
 
                 except ValueError:
                     print "Can NOT find a translation for line: {}".format(i+1)
