@@ -10,7 +10,8 @@ from theano import tensor
 from toolz import merge
 from picklable_itertools.extras import equizip
 
-from blocks.algorithms import (AdaDelta, CompositeRule, Adam)
+from blocks.algorithms import (AdaDelta, CompositeRule, Adam, RemoveNotFinite,
+                               StepClipping)
 from blocks.filter import VariableFilter
 from blocks.model import Model
 from blocks.graph import ComputationGraph
@@ -480,9 +481,6 @@ class AttentionRecurrentWithMultiContext(AbstractAttentionRecurrent,
         self.attention.state_dims = self.transition.get_dims(
             self.attention.state_names)
 
-        # TODO: this already pushed, check it
-        #self.attention.attended_dims = self.get_dim(self.attended_name)
-
         self.distribute.source_dim = self.attention.get_dim(
             self.distribute.source_name)
         self.distribute.target_dims = self.transition.get_dims(
@@ -725,8 +723,7 @@ class Decoder(Initializable):
             attended_0=representation,
             attended_1=src_selector_rep,
             attended_2=trg_selector_rep,
-            attended_mask=attended_mask,
-            glimpses=self.attention.take_glimpses.outputs[0])
+            attended_mask=attended_mask)
 
 
 def main(config, tr_stream, dev_streams):
@@ -876,7 +873,8 @@ def main(config, tr_stream, dev_streams):
     algorithm = GradientDescentWithMultiCG(
         costs=costs, params=training_params, drop_input=config['drop_input'],
         step_rule=CompositeRule(
-            [StepClippingWithRemoveNotFinite(threshold=config['step_clipping']),
+            [StepClipping(threshold=config['step_clipping']),
+             RemoveNotFinite(0.9),
              eval(config['step_rule'])(learning_rate=config['learning_rate'])]))
 
     # Set up training model
@@ -920,13 +918,15 @@ def main(config, tr_stream, dev_streams):
         # Add sampling for multi encoder
         extensions.append(Sampler(
             sampling_model, tr_stream, num_samples=config['hook_samples'],
-            enc_id=i, every_n_batches=config['sampling_freq']))
+            src_eos_idx=config['src_eos_idx_%d' % i],
+            trg_eos_idx=config['trg_eos_idx'], enc_id=i,
+            every_n_batches=config['sampling_freq']))
 
         # Add bleu validator for multi encoder, except for the identical
         # mapping languages such as english-to-english computation graph
         if config['src_data_%d' % i] != config['trg_data_%d' % i]:
             extensions.append(BleuValidator(
-                sampling_input, samples, sampling_model, dev_streams[i],
+                samples, sampling_model, dev_streams[i],
                 src_selector=sampling_src_sel, trg_selector=sampling_trg_sel,
                 src_vocab_size=config['src_vocab_size_%d' % i],
                 bleu_script=config['bleu_script'],
@@ -935,6 +935,8 @@ def main(config, tr_stream, dev_streams):
                 beam_size=config['beam_size'],
                 val_burn_in=config['val_burn_in'],
                 enc_id=i, saveto=config['saveto'],
+                src_eos_idx=config['src_eos_idx_%d' % i],
+                trg_eos_idx=config['trg_eos_idx'],
                 every_n_batches=config['bleu_val_freq']))
 
     # Reload model if necessary

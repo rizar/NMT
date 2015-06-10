@@ -22,9 +22,9 @@ class SamplingBase(object):
         return self._get_attr_rec(getattr(obj, attr), attr) \
             if hasattr(obj, attr) else obj
 
-    def _get_true_length(self, seq, vocab):
+    def _get_true_length(self, seq, eos_idx):
         try:
-            return seq.tolist().index(vocab['</S>']) + 1
+            return seq.tolist().index(eos_idx) + 1
         except ValueError:
             return len(seq)
 
@@ -32,7 +32,7 @@ class SamplingBase(object):
         return [x if x < self.src_vocab_size else self.unk_idx
                 for x in seq]
 
-    def _parse_input(self, line):
+    def _parse_input(self, line, eos_idx):
         seqin = line.split()
         seqlen = len(seqin)
         seq = numpy.zeros(seqlen+1, dtype='int64')
@@ -40,7 +40,7 @@ class SamplingBase(object):
             seq[idx] = self.vocab.get(sx, self.unk_idx)
             if seq[idx] >= self.src_vocab_size:
                 seq[idx] = self.unk_idx
-        seq[-1] = self.eos_idx
+        seq[-1] = eos_idx
         return seq
 
     def _idx_to_word(self, seq, ivocab):
@@ -70,7 +70,8 @@ class Sampler(SimpleExtension, SamplingBase):
 
     def __init__(self, model, data_stream, num_samples=1,
                  src_vocab=None, trg_vocab=None, src_ivocab=None,
-                 trg_ivocab=None, enc_id=None, **kwargs):
+                 trg_ivocab=None, enc_id=None,
+                 src_eos_idx=-1, trg_eos_idx=-1, **kwargs):
         super(Sampler, self).__init__(**kwargs)
         self.model = model
         self.data_stream = data_stream
@@ -79,6 +80,8 @@ class Sampler(SimpleExtension, SamplingBase):
         self.trg_vocab = trg_vocab
         self.src_ivocab = src_ivocab
         self.trg_ivocab = trg_ivocab
+        self.src_eos_idx = src_eos_idx
+        self.trg_eos_idx = trg_eos_idx
         self.enc_id = enc_id if enc_id is not None else ""
         self._synced = False
         self.sampling_fn = model.get_theano_function()
@@ -122,10 +125,10 @@ class Sampler(SimpleExtension, SamplingBase):
             self.trg_vocab = self.sources.data_streams[1].dataset.dictionary
         if not self.src_ivocab:
             self.src_ivocab = {v: k for k, v in self.src_vocab.items()}
-            self.src_ivocab[self.src_vocab['</S>']] = '</S>'
+            self.src_ivocab[self.src_eos_idx] = '</S>'
         if not self.trg_ivocab:
             self.trg_ivocab = {v: k for k, v in self.trg_vocab.items()}
-            self.trg_ivocab[self.trg_vocab['</S>']] = '</S>'
+            self.trg_ivocab[self.trg_eos_idx] = '</S>'
 
         sample_idx = numpy.random.choice(
                 batch_size, self.num_samples, replace=False)
@@ -150,9 +153,9 @@ class Sampler(SimpleExtension, SamplingBase):
         print ""
         print "Sampling from computation graph[{}]".format(self.enc_id)
         for i in range(len(outputs)):
-            input_length = self._get_true_length(input_[i], self.src_vocab)
-            target_length = self._get_true_length(target_[i], self.trg_vocab)
-            sample_length = self._get_true_length(outputs[i], self.trg_vocab)
+            input_length = self._get_true_length(input_[i], self.src_eos_idx)
+            target_length = self._get_true_length(target_[i], self.trg_eos_idx)
+            sample_length = self._get_true_length(outputs[i], self.trg_eos_idx)
 
             print "Input : ", self._idx_to_word(input_[i][:input_length],
                                                 self.src_ivocab)
@@ -166,15 +169,14 @@ class Sampler(SimpleExtension, SamplingBase):
 
 class BleuValidator(SimpleExtension, SamplingBase):
 
-    def __init__(self, source_sentence, samples, model, data_stream,
+    def __init__(self, samples, model, data_stream,
                  bleu_script, val_set_out, val_set_grndtruth, src_vocab_size,
                  src_selector=None, trg_selector=None,
                  n_best=1, track_n_models=1, trg_ivocab=None,
                  beam_size=5, val_burn_in=10000,
                  _reload=True, enc_id=None, saveto=None,
-                 **kwargs):
+                 src_eos_idx=-1, trg_eos_idx=-1, **kwargs):
         super(BleuValidator, self).__init__(**kwargs)
-        self.source_sentence = source_sentence
         self.samples = samples
         self.model = model
         self.data_stream = data_stream
@@ -196,16 +198,17 @@ class BleuValidator(SimpleExtension, SamplingBase):
         self._synced = False
         self._multiCG = False
 
+        self.src_eos_idx = src_eos_idx
+        self.trg_eos_idx = trg_eos_idx
+
         # Helpers
         self.vocab = data_stream.dataset.dictionary
         self.unk_sym = data_stream.dataset.unk_token
         self.eos_sym = data_stream.dataset.eos_token
         self.unk_idx = self.vocab[self.unk_sym]
-        self.eos_idx = self.vocab[self.eos_sym]
         self.best_models = []
         self.val_bleu_curve = []
-        self.beam_search = BeamSearch(source_sentence,
-                                      beam_size=beam_size,
+        self.beam_search = BeamSearch(beam_size=beam_size,
                                       samples=samples)
         self.multibleu_cmd = ['perl', bleu_script, val_set_grndtruth, '<']
 
@@ -311,7 +314,7 @@ class BleuValidator(SimpleExtension, SamplingBase):
             trans, costs = \
                 self.beam_search.search(
                     input_values=inputs_dict,
-                    max_length=3*len(seq), eol_symbol=self.eos_idx,
+                    max_length=3*len(seq), eol_symbol=self.trg_eos_idx,
                     ignore_first_eol=True)
 
             nbest_idx = numpy.argsort(costs)[:self.n_best]

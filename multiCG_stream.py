@@ -1,10 +1,3 @@
-#
-# WARNING: SLOW STREAM
-# Should probably use caching and multiprocessing like in the tutorial
-# The files are those from WMT15, the vocab files are simply the 30,000 most
-# common words of the raw data
-#
-
 import cPickle
 import numpy
 import six
@@ -148,33 +141,44 @@ class MultiEncStream(Transformer, six.Iterator):
         self.epoch_counter[idx] += 1
 
 
-# If you wrap following functions, main_loop cannot be pickled ****************
 def _length(sentence_pair):
     '''Assumes target is the last element in the tuple'''
     return len(sentence_pair[-1])
 
 
-def _oov_to_unk(sentence_pair, src_vocab_size=30000,
-                trg_vocab_size=30000, unk_id=1):
-    return ([x if x < src_vocab_size else unk_id for x in sentence_pair[0]],
-            [x if x < trg_vocab_size else unk_id for x in sentence_pair[1]])
+class RemapWordIdx(object):
+    def __init__(self, mappings):
+        self.mappings = mappings
+
+    def __call__(self, sentence_pair):
+        for mapping in self.mappings:
+            sentence_pair[mapping[0]][numpy.where(
+                sentence_pair[mapping[0]] == mapping[1])] = mapping[2]
+        return sentence_pair
 
 
-def _too_long(sentence_pair, **kwargs):
-    # TODO: harmonize arguments with oov_to_unk
-    seq_len = 50
-    if 'seq_len' in kwargs:
-        seq_len = kwargs['seq_len']
-    return all([len(sentence) <= seq_len
-                for sentence in sentence_pair])
+class _oov_to_unk(object):
+    def __init__(self, src_vocab_size=30000, trg_vocab_size=30000,
+                 unk_id=1):
+        self.src_vocab_size = src_vocab_size
+        self.trg_vocab_size = trg_vocab_size
+        self.unk_id = unk_id
+
+    def __call__(self, sentence_pair):
+        return ([x if x < self.src_vocab_size else self.unk_id
+                 for x in sentence_pair[0]],
+                [x if x < self.trg_vocab_size else self.unk_id
+                 for x in sentence_pair[1]])
 
 
-def _oov_to_unk_multi(sentence_pair, src_vocab_sizes=None,
-                      trg_vocab_size=30000, unk_id=1):
-    return tuple([[x if x < src_vocab_sizes[i] else unk_id for x in sentence_pair[i]]
-                  for i in xrange(len(src_vocab_sizes))] +
-                 [[x if x < trg_vocab_size else unk_id for x in sentence_pair[1]]])
-# *****************************************************************************
+class _too_long(object):
+    def __init__(self, seq_len=50):
+        self.seq_len = seq_len
+
+    def __call__(self, sentence_pair):
+        return all([len(sentence) <= self.seq_len
+                    for sentence in sentence_pair])
+
 
 # Prepare source vocabs and files, there are 2 vocabs and 2 data files
 src_vocabs = [config['src_vocab_%d' % x] for x in xrange(num_encs)]
@@ -198,12 +202,11 @@ for i in xrange(num_encs):
     stream = Merge([src_datasets[i].get_example_stream(),
                     trg_datasets[i].get_example_stream()],
                    ('source', 'target'))
-    stream = Filter(stream, predicate=_too_long,
-                    predicate_args={'seq_len': config['seq_len']})
-    stream = Mapping(stream, _oov_to_unk,
+    stream = Filter(stream, predicate=_too_long(config['seq_len']))
+    stream = Mapping(stream, _oov_to_unk(
                      src_vocab_size=config['src_vocab_size_%d' % i],
                      trg_vocab_size=config['trg_vocab_size'],
-                     unk_id=config['unk_id'])
+                     unk_id=config['unk_id']))
     stream = Batch(stream,
                    iteration_scheme=ConstantScheme(
                        config['batch_size_enc_%d' % i]*config['sort_k_batches']))
@@ -213,6 +216,9 @@ for i in xrange(num_encs):
     stream = Batch(stream, iteration_scheme=ConstantScheme(
         config['batch_size_enc_%d' % i]))
     masked_stream = Padding(stream)
+    masked_stream = Mapping(
+        masked_stream, RemapWordIdx([(0, 0, config['src_eos_idx_%d' % i]),
+                                     (2, 0, config['trg_eos_idx'])]))
     ind_streams.append(masked_stream)
 
 multi_enc_stream = MultiEncStream(ind_streams, schedule=config['schedule'],
@@ -228,4 +234,3 @@ for i in xrange(config['num_encs']):
         dev_dataset = TextFile(
             [dev_file], cPickle.load(open(src_vocabs[i])), None)
         dev_streams.append(DataStream(dev_dataset))
-
