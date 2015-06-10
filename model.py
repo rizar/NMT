@@ -5,7 +5,6 @@ from collections import Counter
 import argparse
 import logging
 import pprint
-import theano
 from theano import tensor
 from toolz import merge
 from picklable_itertools.extras import equizip
@@ -37,7 +36,6 @@ from blocks.bricks.sequence_generators import (
 )
 
 import config
-import stream
 import stream_fi_en
 
 from sampling import BleuValidator, Sampler
@@ -56,8 +54,7 @@ config = getattr(config, args.proto)()
 
 
 # dictionary mapping stream name to stream getters
-streams = {'fi-en': stream_fi_en,
-           'en-fr': stream}
+streams = {'fi-en': stream_fi_en}
 
 
 # Helper class

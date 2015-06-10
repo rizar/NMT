@@ -84,8 +84,8 @@ class Sampler(SimpleExtension, SamplingBase):
 
         sample_idx = numpy.random.choice(batch['source'].shape[0],
                         self.config['hook_samples'], replace=False)
-        src_batch = batch[self.main_loop.data_stream.mask_sources[0]]
-        trg_batch = batch[self.main_loop.data_stream.mask_sources[1]]
+        src_batch = batch['source']
+        trg_batch = batch['target']
 
         input_ = src_batch[sample_idx, :]
         target_ = trg_batch[sample_idx, :]
@@ -114,7 +114,7 @@ class BleuValidator(SimpleExtension, SamplingBase):
 
     def __init__(self, source_sentence, samples, model, data_stream,
                  config, n_best=1, track_n_models=1, trg_ivocab=None,
-                 **kwargs):
+                 src_eos_idx=-1, trg_eos_idx=-1, **kwargs):
         super(BleuValidator, self).__init__(**kwargs)
         self.source_sentence = source_sentence
         self.samples = samples
@@ -125,13 +125,16 @@ class BleuValidator(SimpleExtension, SamplingBase):
         self.track_n_models = track_n_models
         self.verbose = config.get('val_set_out', None)
 
+        self.src_eos_idx = src_eos_idx
+        self.trg_eos_idx = trg_eos_idx
+
         # Helpers
         self.vocab = data_stream.dataset.dictionary
         self.trg_ivocab = trg_ivocab
         self.unk_sym = data_stream.dataset.unk_token
         self.eos_sym = data_stream.dataset.eos_token
         self.unk_idx = self.vocab[self.unk_sym]
-        self.eos_idx = self.vocab[self.eos_sym]
+        self.eos_idx = self.src_eos_idx  #self.vocab[self.eos_sym]
         self.best_models = []
         self.val_bleu_curve = []
         self.beam_search = BeamSearch(beam_size=self.config['beam_size'],
@@ -165,6 +168,10 @@ class BleuValidator(SimpleExtension, SamplingBase):
                 self.config['val_burn_in']:
             return
 
+        # Get current model parameters
+        self.model.set_param_values(
+            self.main_loop.model.get_param_values())
+
         # Evaluate and save if necessary
         self._save_model(self._evaluate_model())
 
@@ -189,6 +196,7 @@ class BleuValidator(SimpleExtension, SamplingBase):
             Load the sentence, retrieve the sample, write to file
             """
 
+            line[0][-1] = self.src_eos_idx
             seq = self._oov_to_unk(line[0])
             input_ = numpy.tile(seq, (self.config['beam_size'], 1))
 
@@ -196,7 +204,7 @@ class BleuValidator(SimpleExtension, SamplingBase):
             trans, costs = \
                 self.beam_search.search(
                     input_values={self.source_sentence: input_},
-                    max_length=3*len(seq), eol_symbol=self.eos_idx,
+                    max_length=3*len(seq), eol_symbol=self.trg_eos_idx,
                     ignore_first_eol=True)
 
             nbest_idx = numpy.argsort(costs)[:self.n_best]

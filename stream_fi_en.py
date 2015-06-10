@@ -6,6 +6,7 @@
 #
 
 import cPickle
+import numpy
 
 from fuel.datasets import TextFile
 from fuel.schemes import ConstantScheme
@@ -18,22 +19,33 @@ from fuel.transformers import (
 from model import config
 
 
+class RemapWordIdx(object):
+    def __init__(self, mappings):
+        self.mappings = mappings
+
+    def __call__(self, sentence_pair):
+        for mapping in self.mappings:
+            sentence_pair[mapping[0]][numpy.where(
+                sentence_pair[mapping[0]] == mapping[1])] = mapping[2]
+        return sentence_pair
+
+
 def _length(sentence_pair):
     return len(sentence_pair[1])
 
 
 class _oov_to_unk(object):
     def __init__(self, src_vocab_size=30000, trg_vocab_size=30000,
-            unk_id=1):
+                 unk_id=1):
         self.src_vocab_size = src_vocab_size
         self.trg_vocab_size = trg_vocab_size
         self.unk_id = unk_id
 
     def __call__(self, sentence_pair):
         return ([x if x < self.src_vocab_size else self.unk_id
-                     for x in sentence_pair[0]],
+                 for x in sentence_pair[0]],
                 [x if x < self.trg_vocab_size else self.unk_id
-                     for x in sentence_pair[1]])
+                 for x in sentence_pair[1]])
 
 
 class _too_long(object):
@@ -41,7 +53,7 @@ class _too_long(object):
         self.seq_len = seq_len
 
     def __call__(self, sentence_pair):
-        return all([len(sentence) < self.seq_len
+        return all([len(sentence) <= self.seq_len
                     for sentence in sentence_pair])
 
 fi_vocab = config['src_vocab']
@@ -69,6 +81,9 @@ stream = Mapping(stream, SortMapping(_length))
 stream = Unpack(stream)
 stream = Batch(stream, iteration_scheme=ConstantScheme(config['batch_size']))
 masked_stream = Padding(stream)
+masked_stream = Mapping(
+    masked_stream, RemapWordIdx([(0, 0, config['src_eos_idx']),
+                                 (2, 0, config['trg_eos_idx'])]))
 
 # Setup development set stream if necessary
 dev_stream = None
@@ -76,4 +91,3 @@ if 'val_set' in config and config['val_set']:
     dev_file = config['val_set']
     dev_dataset = TextFile([dev_file], cPickle.load(open(fi_vocab)), None)
     dev_stream = DataStream(dev_dataset)
-
