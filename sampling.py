@@ -58,15 +58,9 @@ class Sampler(SimpleExtension, SamplingBase):
         self.trg_vocab = trg_vocab
         self.src_ivocab = src_ivocab
         self.trg_ivocab = trg_ivocab
-        self.is_synced = False
         self.sampling_fn = model.get_theano_function()
 
     def do(self, which_callback, *args):
-
-        # Get current model parameters
-        if not self.is_synced:
-            self.model.params = self.main_loop.model.params
-            self.is_synced = True
 
         # Get dictionaries, this may not be the practical way
         sources = self._get_attr_rec(self.main_loop, 'data_stream')
@@ -140,8 +134,7 @@ class BleuValidator(SimpleExtension, SamplingBase):
         self.eos_idx = self.vocab[self.eos_sym]
         self.best_models = []
         self.val_bleu_curve = []
-        self.beam_search = BeamSearch(source_sentence,
-                                      beam_size=self.config['beam_size'],
+        self.beam_search = BeamSearch(beam_size=self.config['beam_size'],
                                       samples=samples)
         self.multibleu_cmd = ['perl', self.config['bleu_script'],
                               self.config['val_set_grndtruth'], '<']
@@ -171,10 +164,6 @@ class BleuValidator(SimpleExtension, SamplingBase):
         if self.main_loop.status['iterations_done'] <= \
                 self.config['val_burn_in']:
             return
-
-        # Get current model parameters
-        self.model.set_param_values(
-            self.main_loop.model.get_param_values())
 
         # Evaluate and save if necessary
         self._save_model(self._evaluate_model())
@@ -217,7 +206,7 @@ class BleuValidator(SimpleExtension, SamplingBase):
                     trans_out = trans[best]
 
                     # convert idx to words
-                    trans_out = self._idx_to_word(trans_out, self.trg_ivocab)
+                    trans_out = self._idx_to_word(trans_out[:-1], self.trg_ivocab)
 
                 except ValueError:
                     print "Can NOT find a translation for line: {}".format(i+1)

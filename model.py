@@ -11,7 +11,7 @@ from toolz import merge
 from picklable_itertools.extras import equizip
 
 from blocks.algorithms import (GradientDescent, StepClipping, AdaDelta,
-                               CompositeRule)
+                               CompositeRule, RemoveNotFinite)
 from blocks.dump import MainLoopDumpManager
 from blocks.filter import VariableFilter
 from blocks.main_loop import MainLoop
@@ -35,7 +35,6 @@ from blocks.bricks.sequence_generators import (
     LookupFeedback, Readout, SoftmaxEmitter,
     SequenceGenerator
 )
-from blocks.select import Selector
 
 import config
 import stream
@@ -157,11 +156,11 @@ class BidirectionalEncoder(Initializable):
         self.lookup.dim = self.embedding_dim
 
         self.fwd_fork.input_dim = self.embedding_dim
-        self.fwd_fork.output_dims = [self.state_dim
-                                 for _ in self.fwd_fork.output_names]
+        self.fwd_fork.output_dims = [self.bidir.children[0].get_dim(name)
+                                 for name in self.fwd_fork.output_names]
         self.back_fork.input_dim = self.embedding_dim
-        self.back_fork.output_dims = [self.state_dim
-                                 for _ in self.back_fork.output_names]
+        self.back_fork.output_dims = [self.bidir.children[1].get_dim(name)
+                                 for name in self.back_fork.output_names]
 
     @application(inputs=['source_sentence', 'source_sentence_mask'],
                  outputs=['representation'])
@@ -197,10 +196,7 @@ class GRUInitialState(GatedRecurrent):
             initial_state = self.initial_transformer.apply(
                 attended[0, :, -self.attended_dim:])
             return initial_state
-        dim = self.get_dim(state_name)
-        if dim == 0:
-            return tensor.zeros((batch_size,))
-        return tensor.zeros((batch_size, dim))
+        return super(GRUInitialState, self).initial_state(state_name, batch_size, *args, **kwargs)
 
 
 class Decoder(Initializable):
@@ -290,8 +286,6 @@ def main(config, tr_stream, dev_stream):
     cost = decoder.cost(encoder.apply(source_sentence, source_sentence_mask),
                         source_sentence_mask, target_sentence, target_sentence_mask)
 
-    cg = ComputationGraph(cost)
-
     # Initialize model
     encoder.weights_init = decoder.weights_init = IsotropicGaussian(config['weight_scale'])
     encoder.biases_init = decoder.biases_init = Constant(0)
@@ -318,8 +312,10 @@ def main(config, tr_stream, dev_stream):
         enc_params += Selector(encoder.back_fork).get_params().values()
         dec_params = Selector(decoder.sequence_generator.readout).get_params().values()
         dec_params += Selector(decoder.sequence_generator.fork).get_params().values()
-        dec_params += Selector(decoder.state_init).get_params().values()
+        dec_params += Selector(decoder.transition.initial_transformer).get_params().values()
         cg = apply_noise(cg, enc_params+dec_params, config['weight_noise_ff'])
+
+    cost = cg.outputs[0]
 
     # Print shapes
     shapes = [param.get_value().shape for param in cg.parameters]
@@ -340,6 +336,7 @@ def main(config, tr_stream, dev_stream):
     algorithm = GradientDescent(
         cost=cost, params=cg.parameters,
         step_rule=CompositeRule([StepClipping(config['step_clipping']),
+                                 RemoveNotFinite(0.9),
                                  eval(config['step_rule'])()])
     )
 
