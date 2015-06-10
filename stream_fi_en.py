@@ -6,6 +6,7 @@
 #
 
 import cPickle
+import numpy
 
 from fuel.datasets import TextFile
 from fuel.schemes import ConstantScheme
@@ -15,7 +16,19 @@ from fuel.transformers import (
 
 # Everthing here should be wrapped and parameterized by config
 # this import is to workaround for pickling errors when wrapped
-from model import config
+from model_sanity import config
+
+
+class RemapWordIdx(object):
+    def __init__(self, mapping):
+        self.mapping = mapping
+
+    def __call__(self, sentence_pair):
+        sentence_pair[0][numpy.where(
+            sentence_pair[0] == self.mapping[0])] = self.mapping[1]
+        sentence_pair[2][numpy.where(
+            sentence_pair[2] == self.mapping[0])] = self.mapping[1]
+        return sentence_pair
 
 
 def _length(sentence_pair):
@@ -32,7 +45,7 @@ def _oov_to_unk(sentence_pair, src_vocab_size=30000,
 
 
 def _too_long(sentence_pair, seq_len=50):
-    return all([len(sentence) < seq_len
+    return all([len(sentence) <= seq_len
                 for sentence in sentence_pair])
 
 fi_vocab = config['src_vocab']
@@ -61,6 +74,7 @@ stream = Mapping(stream, SortMapping(_length))
 stream = Unpack(stream)
 stream = Batch(stream, iteration_scheme=ConstantScheme(config['batch_size']))
 masked_stream = Padding(stream)
+masked_stream = Mapping(masked_stream, RemapWordIdx((0, 40000)))
 
 # Setup development set stream if necessary
 dev_stream = None

@@ -3,9 +3,11 @@
 # 0e23b0193f64dc3e56da18605d53d6f5b1352848
 from collections import Counter
 import argparse
+import logging
 import numpy
 import os
 import cPickle
+import pprint
 import theano
 from theano import tensor
 from toolz import merge
@@ -19,7 +21,7 @@ from blocks.main_loop import MainLoop
 from blocks.model import Model
 from blocks.graph import ComputationGraph
 from blocks.initialization import IsotropicGaussian, Orthogonal, Constant
-from blocks.extensions import Printing
+from blocks.extensions import Printing, FinishAfter
 from blocks.extensions.monitoring import TrainingDataMonitoring
 from blocks.extensions.saveload import Checkpoint, LoadFromDump
 from blocks.extensions.plot import Plot
@@ -35,9 +37,30 @@ from blocks.bricks.sequence_generators import (
     LookupFeedback, Readout, SoftmaxEmitter,
     SequenceGenerator
 )
+from blocks.select import Selector
 
-from stream_fi_en import masked_stream, state, dev_stream
+import config
+#import stream
+import stream_fi_en
+
 from sampling import BleuValidator, Sampler
+
+logger = logging.getLogger(__name__)
+
+# Get the arguments
+parser = argparse.ArgumentParser()
+parser.add_argument("--proto",  default="get_config_wmt15_fi_en_40k",
+                    help="Prototype config to use for config")
+args = parser.parse_args()
+
+# Make config global, nasty workaround since parameterizing stream
+# will cause erroneous picklable behaviour, find a better solution
+config = getattr(config, args.proto)()
+
+
+# dictionary mapping stream name to stream getters
+streams = {'fi-en': stream_fi_en}  #,
+#           'en-fr': stream}
 
 
 # Helper class
@@ -166,12 +189,13 @@ class Decoder(Initializable):
             emitter=SoftmaxEmitter(initial_output=-1),
             feedback_brick=LookupFeedbackWMT15(vocab_size, embedding_dim),
             post_merge=InitializableFeedforwardSequence(
-                [Bias(dim=state_dim).apply,
-                 Maxout(num_pieces=2).apply,
+                [Bias(dim=state_dim, name='maxout_bias').apply,
+                 Maxout(num_pieces=2, name='maxout').apply,
                  Linear(input_dim=state_dim / 2, output_dim=embedding_dim,
-                        use_bias=False).apply,
-                 Linear(input_dim=embedding_dim).apply]),
-            merged_dim=state_dim)
+                        use_bias=False, name='softmax0').apply,
+                 Linear(input_dim=embedding_dim, name='softmax1').apply]),
+            merged_dim=state_dim,
+            merge_prototype=Linear(use_bias=True))
 
         self.sequence_generator = SequenceGenerator(
             readout=readout,
@@ -195,13 +219,13 @@ class Decoder(Initializable):
 
         # Get the cost matrix
         cost = self.sequence_generator.cost_matrix(
-                    **{'mask': target_sentence_mask,
-                       'outputs': target_sentence,
-                       'attended': representation,
-                       'attended_mask': source_sentence_mask}
+            **{'mask': target_sentence_mask,
+               'outputs': target_sentence,
+               'attended': representation,
+               'attended_mask': source_sentence_mask}
         )
 
-        return (cost * target_sentence_mask).sum() / target_sentence_mask.shape[1]
+        return (cost * target_sentence_mask).sum()  # / target_sentence_mask.shape[1]
 
     @application
     def generate(self, source_sentence, representation):
@@ -209,17 +233,16 @@ class Decoder(Initializable):
             n_steps=2 * source_sentence.shape[1],
             batch_size=source_sentence.shape[0],
             attended=representation,
-            attended_mask=tensor.ones(source_sentence.shape).T,
-            glimpses=self.attention.take_glimpses.outputs[0])
+            attended_mask=tensor.ones(source_sentence.shape).T)
 
 
-if __name__ == "__main__":
+def main(config, tr_stream, dev_stream):
 
     # Create Theano variables
-    source_sentence = tensor.lmatrix('finnish')
-    source_sentence_mask = tensor.matrix('finnish_mask')
-    target_sentence = tensor.lmatrix('english')
-    target_sentence_mask = tensor.matrix('english_mask')
+    source_sentence = tensor.lmatrix('source')
+    source_sentence_mask = tensor.matrix('source_mask')
+    target_sentence = tensor.lmatrix('target')
+    target_sentence_mask = tensor.matrix('target_mask')
     sampling_input = tensor.lmatrix('input')
 
     # Test values
@@ -235,15 +258,15 @@ if __name__ == "__main__":
     '''
 
     # Construct model
-    encoder = BidirectionalEncoder(state['src_vocab_size'], state['enc_embed'],
-                                   state['enc_nhids'])
-    decoder = Decoder(state['trg_vocab_size'], state['dec_embed'],
-                      state['dec_nhids'], state['enc_nhids'] * 2)
+    encoder = BidirectionalEncoder(config['src_vocab_size'], config['enc_embed'],
+                                   config['enc_nhids'])
+    decoder = Decoder(config['trg_vocab_size'], config['dec_embed'],
+                      config['dec_nhids'], config['enc_nhids'] * 2)
     cost = decoder.cost(encoder.apply(source_sentence, source_sentence_mask),
                         source_sentence_mask, target_sentence, target_sentence_mask)
 
     # Initialize model
-    encoder.weights_init = decoder.weights_init = IsotropicGaussian(state['weight_scale'])
+    encoder.weights_init = decoder.weights_init = IsotropicGaussian(config['weight_scale'])
     encoder.biases_init = decoder.biases_init = Constant(0)
     encoder.push_initialization_config()
     decoder.push_initialization_config()
@@ -263,38 +286,26 @@ if __name__ == "__main__":
     # Set up training algorithm
     algorithm = GradientDescent(
         cost=cost, params=cg.parameters,
-        step_rule=CompositeRule([StepClipping(state['step_clipping']),
-                                 eval(state['step_rule'])()])
+        step_rule=CompositeRule([StepClipping(config['step_clipping']),
+                                 eval(config['step_rule'])()])
     )
 
-    # Set up beam search
-    '''
-    theano.config.compute_test_value = 'warn'
-    sampling_input.tag.test_value = numpy.random.randint(10, size=(5, 7))
-    '''
-    sampling_encoder = BidirectionalEncoder(
-        state['src_vocab_size'], state['enc_embed'], state['enc_nhids'])
-    sampling_decoder = Decoder(state['trg_vocab_size'], state['dec_embed'],
-                               state['dec_nhids'], state['enc_nhids'] * 2)
-    sampling_encoder.weights_init = sampling_decoder.weights_init = Constant(0)
-    sampling_encoder.biases_init = sampling_decoder.biases_init = Constant(0)
-    sampling_representation = sampling_encoder.apply(
+    # Set up beam search and sampling computation graphs
+    sampling_representation = encoder.apply(
         sampling_input, tensor.ones(sampling_input.shape))
-    generated = sampling_decoder.generate(
-        sampling_input, sampling_representation)
+    generated = decoder.generate(sampling_input, sampling_representation)
     search_model = Model(generated)
     samples, = VariableFilter(
-        bricks=[sampling_decoder.sequence_generator], name="outputs")(
+        bricks=[decoder.sequence_generator], name="outputs")(
             ComputationGraph(generated[1]))  # generated[1] is the next_outputs
 
     # Set up training model
     training_model = Model(cost)
 
-    from blocks.select import Selector
     enc_param_dict = Selector(encoder).get_params()
     dec_param_dict = Selector(decoder).get_params()
 
-    gh_model_name = '/data/lisatmp3/firatorh/nmt/wmt15/trainedModels/withoutLM/refGHOG_best_bleu_model.npz'
+    gh_model_name = '/data/lisatmp3/firatorh/nmt/wmt15/trainedModels/blocks/sanity/refGHOG_adadelta_40k_best_bleu_model.npz'
 
     tmp_file = numpy.load(gh_model_name)
     gh_model = dict(tmp_file)
@@ -305,7 +316,7 @@ if __name__ == "__main__":
     for key in dec_param_dict:
         print '{:15}: {}'.format(dec_param_dict[key].get_value().shape, key)
 
-    enc_param_dict['/bidirectionalencoder/embeddings.W'].set_value(gh_model['W_0_enc_approx_embdr'] + gh_model['b_0_enc_approx_embdr'])
+    enc_param_dict['/bidirectionalencoder/embeddings.W'].set_value(gh_model['W_0_enc_approx_embdr'])
 
     enc_param_dict['/bidirectionalencoder/bidirectionalwmt15/forward.state_to_state'].set_value(gh_model['W_enc_transition_0'])
     enc_param_dict['/bidirectionalencoder/bidirectionalwmt15/forward.state_to_update'].set_value(gh_model['G_enc_transition_0'])
@@ -325,16 +336,18 @@ if __name__ == "__main__":
     enc_param_dict['/bidirectionalencoder/back_fork/fork_update_inputs.W'].set_value(gh_model['W_0_back_enc_update_embdr_0'])
     enc_param_dict['/bidirectionalencoder/back_fork/fork_reset_inputs.W'].set_value(gh_model['W_0_back_enc_reset_embdr_0'])
 
-    dec_param_dict['/decoder/sequencegenerator/readout/lookupfeedbackwmt15/lookuptable.W'].set_value(gh_model['W_0_dec_approx_embdr'] + gh_model['b_0_dec_approx_embdr'])
+    dec_param_dict['/decoder/sequencegenerator/readout/lookupfeedbackwmt15/lookuptable.W'].set_value(gh_model['W_0_dec_approx_embdr'])
+    #dec_param_dict['/decoder/sequencegenerator/readout/lookupfeedback/lookuptable.W'].set_value(gh_model['W_0_dec_approx_embdr'])
 
-    dec_param_dict['/decoder/sequencegenerator/readout/initializablefeedforwardsequence/bias.b'].set_value(gh_model['b_0_dec_hid_readout_0'])
-    decoder.children[0].children[0].children[3].children[2].params[0].set_value(gh_model['W1_dec_deep_softmax']) # Missing W1
-    dec_param_dict['/decoder/sequencegenerator/readout/initializablefeedforwardsequence/linear.W'].set_value(gh_model['W2_dec_deep_softmax'])
-    dec_param_dict['/decoder/sequencegenerator/readout/initializablefeedforwardsequence/linear.b'].set_value(gh_model['b_dec_deep_softmax'])
+    dec_param_dict['/decoder/sequencegenerator/readout/initializablefeedforwardsequence/maxout_bias.b'].set_value(gh_model['b_0_dec_hid_readout_0'])
+    dec_param_dict['/decoder/sequencegenerator/readout/initializablefeedforwardsequence/softmax0.W'].set_value(gh_model['W1_dec_deep_softmax']) # Missing W1
+    dec_param_dict['/decoder/sequencegenerator/readout/initializablefeedforwardsequence/softmax1.W'].set_value(gh_model['W2_dec_deep_softmax'])
+    dec_param_dict['/decoder/sequencegenerator/readout/initializablefeedforwardsequence/softmax1.b'].set_value(gh_model['b_dec_deep_softmax'])
 
     dec_param_dict['/decoder/sequencegenerator/readout/merge/transform_states.W'].set_value(gh_model['W_0_dec_hid_readout_0'])
     dec_param_dict['/decoder/sequencegenerator/readout/merge/transform_feedback.W'].set_value(gh_model['W_0_dec_prev_readout_0'])
     dec_param_dict['/decoder/sequencegenerator/readout/merge/transform_weighted_averages.W'].set_value(gh_model['W_0_dec_repr_readout'])
+    dec_param_dict['/decoder/sequencegenerator/readout/merge/transform_weighted_averages.b'].set_value(gh_model['b_0_dec_repr_readout'])
 
     dec_param_dict['/decoder/sequencegenerator/fork/fork_inputs.b'].set_value(gh_model['b_0_dec_input_embdr_0'])
     dec_param_dict['/decoder/sequencegenerator/fork/fork_inputs.W'].set_value(gh_model['W_0_dec_input_embdr_0'])
@@ -342,8 +355,11 @@ if __name__ == "__main__":
     dec_param_dict['/decoder/sequencegenerator/fork/fork_reset_inputs.W'].set_value(gh_model['W_0_dec_reset_embdr_0'])
 
     dec_param_dict['/decoder/sequencegenerator/att_trans/distribute/fork_inputs.W'].set_value(gh_model['W_0_dec_dec_inputter_0'])
+    dec_param_dict['/decoder/sequencegenerator/att_trans/distribute/fork_inputs.b'].set_value(gh_model['b_0_dec_dec_inputter_0'])
     dec_param_dict['/decoder/sequencegenerator/att_trans/distribute/fork_update_inputs.W'].set_value(gh_model['W_0_dec_dec_updater_0'])
+    dec_param_dict['/decoder/sequencegenerator/att_trans/distribute/fork_update_inputs.b'].set_value(gh_model['b_0_dec_dec_updater_0'])
     dec_param_dict['/decoder/sequencegenerator/att_trans/distribute/fork_reset_inputs.W'].set_value(gh_model['W_0_dec_dec_reseter_0'])
+    dec_param_dict['/decoder/sequencegenerator/att_trans/distribute/fork_reset_inputs.b'].set_value(gh_model['b_0_dec_dec_reseter_0'])
 
     dec_param_dict['/decoder/sequencegenerator/att_trans/decoder.state_to_state'].set_value(gh_model['W_dec_transition_0'])
     dec_param_dict['/decoder/sequencegenerator/att_trans/decoder.state_to_update'].set_value(gh_model['G_dec_transition_0'])
@@ -351,36 +367,42 @@ if __name__ == "__main__":
 
     dec_param_dict['/decoder/sequencegenerator/att_trans/attention/state_trans/transform_states.W'].set_value(gh_model['B_dec_transition_0'])
     dec_param_dict['/decoder/sequencegenerator/att_trans/attention/preprocess.W'].set_value(gh_model['A_dec_transition_0'])
-    dec_param_dict['/decoder/sequencegenerator/att_trans/attention/energy_comp/mlp/linear_0.W'].set_value(gh_model['D_dec_transition_0'])
+    dec_param_dict['/decoder/sequencegenerator/att_trans/attention/energy_comp/linear.W'].set_value(gh_model['D_dec_transition_0'])
 
     dec_param_dict['/decoder/sequencegenerator/att_trans/decoder/state_initializer/linear_0.W'].set_value(gh_model['W_0_dec_initializer_0'])
     dec_param_dict['/decoder/sequencegenerator/att_trans/decoder/state_initializer/linear_0.b'].set_value(gh_model['b_0_dec_initializer_0'])
+
+
+    config['val_burn_in'] = -1
 
     # Initialize main loop
     main_loop = MainLoop(
         model=training_model,
         algorithm=algorithm,
-        data_stream=masked_stream,
+        data_stream=tr_stream,
         extensions=[
-            #LoadFromDump(state['prefix'] + 'model.pkl'),
-            Sampler(model=search_model, state=state, data_stream=masked_stream,
-                    every_n_batches=state['sampling_freq']),
-            BleuValidator(sampling_input, samples=samples, state=state,
+            FinishAfter(after_n_batches=1),
+            Sampler(model=search_model, config=config, data_stream=tr_stream,
+                    every_n_batches=config['sampling_freq']),
+            BleuValidator(sampling_input, samples=samples, config=config,
                           model=search_model, data_stream=dev_stream,
-                          before_batch=True), #every_n_batches=state['bleu_val_freq']),
+                          src_eos_idx=config['src_eos_idx'],
+                          trg_eos_idx=config['trg_eos_idx'],
+                          before_training=True,
+                          before_batch=True), #every_n_batches=config['bleu_val_freq']),
             TrainingDataMonitoring([cost], after_batch=True),
             #Plot('En-Fr', channels=[['decoder_cost_cost']],
             #     after_batch=True),
-            Printing(after_batch=True),
-            Checkpoint(state['prefix'] + 'model.pkl',
-                       every_n_batches=state['save_freq'])
+            Printing(after_batch=True)
         ]
     )
 
-    # Reload model
-    file_to_load = state['prefix'] + 'model.pkl'
-    if state['reload'] and os.path.isfile(file_to_load):
-        main_loop = cPickle.load(open(file_to_load))
-
     # Train!
     main_loop.run()
+
+
+if __name__ == "__main__":
+    logger.info("Model options:\n{}".format(pprint.pformat(config)))
+    tr_stream, dev_stream = [streams[config['stream']].masked_stream,
+                             streams[config['stream']].dev_stream]
+    main(config, tr_stream, dev_stream)
