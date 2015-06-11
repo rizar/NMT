@@ -177,7 +177,7 @@ def get_config_wmt15_fi_en_40k_refMultiCG():
     config['save_freq'] = 1000
     config['sampling_freq'] = 13
     config['bleu_val_freq'] = 5000
-    config['val_burn_in'] = 50000
+    config['val_burn_in'] = 20000
 
     # Monitoring related
     config['hook_samples'] = 2
