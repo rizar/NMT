@@ -935,6 +935,7 @@ def main(config, tr_stream, dev_streams):
                 beam_size=config['beam_size'],
                 val_burn_in=config['val_burn_in'],
                 enc_id=i, saveto=config['saveto'],
+                track_n_models=config['track_n_models'],
                 src_eos_idx=config['src_eos_idx_%d' % i],
                 trg_eos_idx=config['trg_eos_idx'],
                 every_n_batches=config['bleu_val_freq']))

@@ -73,9 +73,12 @@ class TrainingDataMonitoringWithMultiCG(SimpleExtension, MonitoringExtension):
                                 " no more than once per iteration")
             self._last_time_called = self.main_loop.status['iterations_done']
             enc_id = numpy.argmax(args[0]['src_selector'])
-            self.add_records(
-                self.main_loop.log,
-                self._buffers[enc_id].get_aggregated_values().items())
+            records = self._buffers[enc_id].get_aggregated_values().items()
+            if any([numpy.isnan(rec[-1]) or numpy.isinf(rec[-1])
+                    for rec in records]):
+                import ipdb;ipdb.set_trace()
+                logger.error('!!!Non-finite element!!!')
+            self.add_records(self.main_loop.log, records)
             self._buffers[enc_id].initialize_aggregators()
 
 
