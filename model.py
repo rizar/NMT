@@ -3,6 +3,7 @@
 # 0e23b0193f64dc3e56da18605d53d6f5b1352848
 from collections import Counter
 import argparse
+import importlib
 import logging
 import pprint
 from theano import tensor
@@ -36,7 +37,6 @@ from blocks.bricks.sequence_generators import (
 )
 
 import config
-import stream_fi_en
 
 from sampling import BleuValidator, Sampler
 
@@ -51,10 +51,6 @@ args = parser.parse_args()
 # Make config global, nasty workaround since parameterizing stream
 # will cause erroneous picklable behaviour, find a better solution
 config = getattr(config, args.proto)()
-
-
-# dictionary mapping stream name to stream getters
-streams = {'fi-en': stream_fi_en}
 
 
 # Helper class
@@ -381,7 +377,6 @@ def main(config, tr_stream, dev_stream):
 
 if __name__ == "__main__":
     logger.info("Model options:\n{}".format(pprint.pformat(config)))
-    tr_stream, dev_stream = [streams[config['stream']].masked_stream,
-                             streams[config['stream']].dev_stream]
-    main(config, tr_stream, dev_stream)
+    stream = importlib.import_module(config['stream'])
+    main(config, stream.masked_stream, stream.dev_stream)
 
