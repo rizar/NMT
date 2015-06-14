@@ -36,7 +36,7 @@ def get_config_wmt15_fi_en_40k():
 
     # Vocabulary/dataset related
     basedir = '/data/lisatmp3/firatorh/nmt/wmt15/data/fi-en/processed/'
-    config['stream'] = 'fi-en'
+    config['stream'] = 'stream_fi_en'
     config['src_vocab'] = basedir + 'vocab.fi.pkl'
     config['trg_vocab'] = basedir + 'vocab.en.pkl'
     config['src_data'] = basedir + 'all.tok.clean.shuf.seg1.fi-en.fi'
@@ -95,7 +95,7 @@ def get_config_wmt15_fi_en_TEST():
 
     # Vocabulary/dataset related
     basedir = '/data/lisatmp3/firatorh/nmt/wmt15/data/fi-en/processed/'
-    config['stream'] = 'fi-en'
+    config['stream'] = 'stream_fi_en'
     config['src_vocab'] = basedir + 'vocab.fi.pkl'
     config['trg_vocab'] = basedir + 'vocab.en.pkl'
     config['src_data'] = basedir + 'all.tok.clean.shuf.seg1.fi-en.fi'
@@ -152,7 +152,7 @@ def get_config_wmt15_fi_en_40k_refMultiCG():
 
     # Vocabulary/dataset related
     basedir = '/data/lisatmp3/firatorh/nmt/wmt15/data/fi-en/processed/'
-    config['stream'] = 'fi-en'
+    config['stream'] = 'stream_fi_en'
     config['src_vocab'] = basedir + 'vocab.fi.pkl'
     config['trg_vocab'] = basedir + 'vocab.en.pkl'
     config['src_data'] = basedir + 'all.tok.clean.shuf.seg1.fi-en.fi'
