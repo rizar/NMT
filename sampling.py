@@ -20,9 +20,9 @@ class SamplingBase(object):
         return self._get_attr_rec(getattr(obj, attr), attr) \
             if hasattr(obj, attr) else obj
 
-    def _get_true_length(self, seq, vocab):
+    def _get_true_length(self, seq, eos_idx):
         try:
-            return seq.tolist().index(vocab['</S>']) + 1
+            return seq.tolist().index(eos_idx) + 1
         except ValueError:
             return len(seq)
 
@@ -49,7 +49,8 @@ class Sampler(SimpleExtension, SamplingBase):
 
     def __init__(self, model, data_stream, config,
                  src_vocab=None, trg_vocab=None, src_ivocab=None,
-                 trg_ivocab=None, **kwargs):
+                 trg_ivocab=None, src_eos_idx=-1, trg_eos_idx=-1,
+                 **kwargs):
         super(Sampler, self).__init__(**kwargs)
         self.model = model
         self.config = config
@@ -58,6 +59,8 @@ class Sampler(SimpleExtension, SamplingBase):
         self.trg_vocab = trg_vocab
         self.src_ivocab = src_ivocab
         self.trg_ivocab = trg_ivocab
+        self.src_eos_idx = src_eos_idx
+        self.trg_eos_idx = trg_eos_idx
         self.sampling_fn = model.get_theano_function()
 
     def do(self, which_callback, *args):
@@ -74,8 +77,10 @@ class Sampler(SimpleExtension, SamplingBase):
             self.trg_vocab = sources.data_streams[1].dataset.dictionary
         if not self.src_ivocab:
             self.src_ivocab = {v: k for k, v in self.src_vocab.items()}
+            self.src_ivocab[self.src_eos_idx] = '</S>'
         if not self.trg_ivocab:
             self.trg_ivocab = {v: k for k, v in self.trg_vocab.items()}
+            self.trg_ivocab[self.trg_eos_idx] = '</S>'
 
         # Randomly select source samples from the current batch
         # WARNING: Source and target indices from data stream
@@ -96,9 +101,9 @@ class Sampler(SimpleExtension, SamplingBase):
         costs = list(costs.T)
 
         for i in range(len(outputs)):
-            input_length = self._get_true_length(input_[i], self.src_vocab)
-            target_length = self._get_true_length(target_[i], self.trg_vocab)
-            sample_length = self._get_true_length(outputs[i], self.trg_vocab)
+            input_length = self._get_true_length(input_[i], self.src_eos_idx)
+            target_length = self._get_true_length(target_[i], self.trg_eos_idx)
+            sample_length = self._get_true_length(outputs[i], self.trg_eos_idx)
 
             print "Input : ", self._idx_to_word(input_[i][:input_length],
                                                 self.src_ivocab)

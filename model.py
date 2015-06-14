@@ -262,8 +262,7 @@ class Decoder(Initializable):
             n_steps=2 * source_sentence.shape[1],
             batch_size=source_sentence.shape[0],
             attended=representation,
-            attended_mask=tensor.ones(source_sentence.shape).T,
-            glimpses=self.attention.take_glimpses.outputs[0])
+            attended_mask=tensor.ones(source_sentence.shape).T)
 
 
 def main(config, tr_stream, dev_stream):
@@ -351,11 +350,17 @@ def main(config, tr_stream, dev_stream):
 
     # Set extensions
     extensions = [
-        Sampler(model=search_model, config=config, data_stream=tr_stream,
-                every_n_batches=config['sampling_freq']),
-        BleuValidator(sampling_input, samples=samples, config=config,
-                      model=search_model, data_stream=dev_stream,
-                      every_n_batches=config['bleu_val_freq']),
+        Sampler(
+            model=search_model, config=config, data_stream=tr_stream,
+            src_eos_idx=config['src_eos_idx'],
+            trg_eos_idx=config['trg_eos_idx'],
+            every_n_batches=config['sampling_freq']),
+        BleuValidator(
+            sampling_input, samples=samples, config=config,
+            model=search_model, data_stream=dev_stream,
+            src_eos_idx=config['src_eos_idx'],
+            trg_eos_idx=config['trg_eos_idx'],
+            every_n_batches=config['bleu_val_freq']),
         TrainingDataMonitoring([cost], after_batch=True),
         #Plot('En-Fr', channels=[['decoder_cost_cost']],
         #     after_batch=True),
