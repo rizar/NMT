@@ -467,7 +467,7 @@ def get_config_wmt15_fideen_en_fast_idxFix2_nanFix():
     config['load_accumulators'] = True  # be careful with this
     config['exclude_encs'] = [True, True, False]
     # Make this functional
-    config['min_seq_lens'] = [0, 0, 20]
+    config['min_seq_lens'] = [0, 0, 10]
     config['additional_excludes'] = \
         ['/decoder/sequencegeneratorwithmulticontext/readout/lookupfeedbackwmt15/lookuptable.W']
 

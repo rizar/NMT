@@ -107,7 +107,7 @@ class MultiEncStream(Transformer, six.Iterator):
         for i in xrange(self.num_encs):
             batch = self._get_batch_with_reset(self.epoch_iterators[i])
             self._add_selectors(batch, i)
-            #self._add_missing_sources(batch, i)
+            # self._add_missing_sources(batch, i)
             batches.append(batch)
         return batches
 
@@ -180,6 +180,15 @@ class _too_long(object):
                     for sentence in sentence_pair])
 
 
+class _too_short(object):
+    def __init__(self, seq_len=10):
+        self.seq_len = seq_len
+
+    def __call__(self, sentence_pair):
+        return all([len(sentence) >= self.seq_len
+                    for sentence in sentence_pair])
+
+
 # Prepare source vocabs and files, there are 2 vocabs and 2 data files
 src_vocabs = [config['src_vocab_%d' % x] for x in xrange(num_encs)]
 src_files = [config['src_data_%d' % x] for x in xrange(num_encs)]
@@ -203,13 +212,17 @@ for i in xrange(num_encs):
                     trg_datasets[i].get_example_stream()],
                    ('source', 'target'))
     stream = Filter(stream, predicate=_too_long(config['seq_len']))
+
+    if 'min_seq_lens' in config and config['min_seq_len'][i] > 0:
+        stream = Filter(stream, predicate=_too_short(config['min_seq_len'][i]))
+
     stream = Mapping(stream, _oov_to_unk(
                      src_vocab_size=config['src_vocab_size_%d' % i],
                      trg_vocab_size=config['trg_vocab_size'],
                      unk_id=config['unk_id']))
-    stream = Batch(stream,
-                   iteration_scheme=ConstantScheme(
-                       config['batch_size_enc_%d' % i]*config['sort_k_batches']))
+    stream = Batch(
+        stream, iteration_scheme=ConstantScheme(
+           config['batch_size_enc_%d' % i]*config['sort_k_batches']))
 
     stream = Mapping(stream, SortMapping(_length))
     stream = Unpack(stream)
