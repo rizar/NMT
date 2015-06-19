@@ -44,6 +44,8 @@ logger = logging.getLogger(__name__)
 parser = argparse.ArgumentParser()
 parser.add_argument("--proto",  default="get_config_wmt15_fi_en_40k",
                     help="Prototype config to use for config")
+parser.add_argument("--subtensor-fix",  action='store_true',
+                    help="Speed up training by fixing Theano issue #2219")
 args = parser.parse_args()
 
 # Make config global, nasty workaround since parameterizing stream
@@ -323,12 +325,24 @@ def main(config, tr_stream, dev_stream):
     logger.info("Total number of parameters: {}".format(len(enc_dec_param_dict)))
 
     # Set up training algorithm
-    algorithm = GradientDescent(
-        cost=cost, params=cg.parameters,
-        step_rule=CompositeRule([StepClipping(config['step_clipping']),
-                                 RemoveNotFinite(0.9),
-                                 eval(config['step_rule'])()])
-    )
+    if args.subtensor_fix:
+        assert config['step_rule'] == 'AdaDelta'
+        from subtensor_gradient import GradientDescent_SubtensorFix, AdaDelta_SubtensorFix, subtensor_params
+        lookups = subtensor_params(cg, [encoder.lookup, decoder.sequence_generator.readout.feedback_brick.lookup])
+        algorithm = GradientDescent_SubtensorFix(
+            subtensor_params=lookups,
+            cost=cost, params=cg.parameters,
+            step_rule=CompositeRule([StepClipping(config['step_clipping']),
+                                     RemoveNotFinite(0.9),
+                                     AdaDelta_SubtensorFix(subtensor_params=lookups)])
+        )
+    else:
+        algorithm = GradientDescent(
+            cost=cost, params=cg.parameters,
+            step_rule=CompositeRule([StepClipping(config['step_clipping']),
+                                     RemoveNotFinite(0.9),
+                                     eval(config['step_rule'])()])
+        )
 
     # Set up beam search and sampling computation graphs
     sampling_representation = encoder.apply(
