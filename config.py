@@ -617,7 +617,7 @@ def get_config_wmt15_fideen_en_fast_idxFix2_nanFix2():
     config['save_freq'] = 1000
     config['sampling_freq'] = 17
     config['bleu_val_freq'] = 15000
-    config['val_burn_in'] = 80000
+    config['val_burn_in'] = 0
     config['finish_after'] = 10000000
 
     # Monitoring related

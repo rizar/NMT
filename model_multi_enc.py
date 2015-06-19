@@ -469,7 +469,7 @@ def main(config, tr_stream, dev_streams):
         # mapping languages such as english-to-english computation graph
         if config['src_data_%d' % i] != config['trg_data_%d' % i]:
             extensions.append(BleuValidator(
-                samples, sampling_model, dev_streams[i],
+                sampling_input, samples, sampling_model, dev_streams[i],
                 src_selector=sampling_src_sel, trg_selector=sampling_trg_sel,
                 src_vocab_size=config['src_vocab_size_%d' % i],
                 bleu_script=config['bleu_script'],

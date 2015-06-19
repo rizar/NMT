@@ -169,7 +169,7 @@ class Sampler(SimpleExtension, SamplingBase):
 
 class BleuValidator(SimpleExtension, SamplingBase):
 
-    def __init__(self, samples, model, data_stream,
+    def __init__(self, source_sentence, samples, model, data_stream,
                  bleu_script, val_set_out, val_set_grndtruth, src_vocab_size,
                  src_selector=None, trg_selector=None,
                  n_best=1, track_n_models=1, trg_ivocab=None,
@@ -177,6 +177,7 @@ class BleuValidator(SimpleExtension, SamplingBase):
                  _reload=True, enc_id=None, saveto=None,
                  src_eos_idx=-1, trg_eos_idx=-1, **kwargs):
         super(BleuValidator, self).__init__(**kwargs)
+        self.source_sentence = source_sentence
         self.samples = samples
         self.model = model
         self.data_stream = data_stream
