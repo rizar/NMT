@@ -213,8 +213,8 @@ for i in xrange(num_encs):
                    ('source', 'target'))
     stream = Filter(stream, predicate=_too_long(config['seq_len']))
 
-    if 'min_seq_lens' in config and config['min_seq_len'][i] > 0:
-        stream = Filter(stream, predicate=_too_short(config['min_seq_len'][i]))
+    if 'min_seq_lens' in config and config['min_seq_lens'][i] > 0:
+        stream = Filter(stream, predicate=_too_short(config['min_seq_lens'][i]))
 
     stream = Mapping(stream, _oov_to_unk(
                      src_vocab_size=config['src_vocab_size_%d' % i],

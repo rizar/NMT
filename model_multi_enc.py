@@ -16,7 +16,7 @@ from blocks.filter import VariableFilter
 from blocks.model import Model
 from blocks.graph import ComputationGraph
 from blocks.initialization import IsotropicGaussian, Orthogonal, Constant
-from blocks.extensions import Printing, FinishAfter
+from blocks.extensions import Printing, FinishAfter, Timing
 from blocks.extensions.plot import Plot
 
 from blocks.bricks import (Tanh, Maxout, Linear, FeedforwardSequence,
@@ -428,6 +428,7 @@ def main(config, tr_stream, dev_streams):
 
     # Set extensions
     extensions = [
+        Timing(after_batch=True),
         FinishAfter(after_n_batches=config['finish_after']),
         TrainingDataMonitoringWithMultiCG(observables, after_batch=True),
         Printing(after_batch=True),

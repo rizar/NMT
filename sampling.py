@@ -396,6 +396,10 @@ class BleuValidator(SimpleExtension, SamplingBase):
             else:
                 params_to_save = self.main_loop.model.get_param_values()
 
+            # Rename accordingly for blocks compatibility
+            params_to_save = dict(
+                (k.replace('/', '-'), v) for k, v in params_to_save.items())
+
             numpy.savez(model.path, **params_to_save)
             numpy.savez(
                 os.path.join(
