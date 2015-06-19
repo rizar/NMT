@@ -146,7 +146,7 @@ def _length(sentence_pair):
     return len(sentence_pair[-1])
 
 
-class RemapWordIdx(object):
+class _remapWordIdx(object):
     def __init__(self, mappings):
         self.mappings = mappings
 
@@ -217,7 +217,7 @@ for i in xrange(num_encs):
         config['batch_size_enc_%d' % i]))
     masked_stream = Padding(stream)
     masked_stream = Mapping(
-        masked_stream, RemapWordIdx([(0, 0, config['src_eos_idx_%d' % i]),
+        masked_stream, _remapWordIdx([(0, 0, config['src_eos_idx_%d' % i]),
                                      (2, 0, config['trg_eos_idx'])]))
     ind_streams.append(masked_stream)
 
