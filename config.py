@@ -378,7 +378,7 @@ def get_config_wmt15_fideen_en_fast_idxFix2():
     config['weight_noise_ff'] = False
     config['weight_noise_rec'] = False
     config['dropout'] = 1.0
-    config['drop_input'] = [0., 0., 0.4]
+    config['drop_input'] = [0., 0., 0.1]
 
     # Vocabulary/dataset related
     basedir = '/data/lisatmp3/firatorh/nmt/wmt15/data/fideen-en/'
@@ -420,7 +420,7 @@ def get_config_wmt15_fideen_en_fast_idxFix2():
 
     # Timing related
     config['reload'] = True
-    config['save_freq'] = 5000
+    config['save_freq'] = 50
     config['sampling_freq'] = 17
     config['bleu_val_freq'] = 15000
     config['val_burn_in'] = 80000

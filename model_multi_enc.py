@@ -29,6 +29,7 @@ from blocks.bricks.lookup import LookupTable
 from blocks.bricks.parallel import Fork, Parallel, Distribute
 from blocks.bricks.recurrent import (GatedRecurrent, Bidirectional, recurrent,
                                      BaseRecurrent)
+from blocks.roles import OUTPUT
 from blocks.select import Selector
 from blocks.bricks.sequence_generators import (
     LookupFeedback, Readout, SoftmaxEmitter,
@@ -384,6 +385,13 @@ class SequenceMultiContentAttention(GenericSequenceAttention, Initializable):
             match_vectors += att
         energies = self.energy_computer.apply(match_vectors).reshape(
             match_vectors.shape[:-1], ndim=match_vectors.ndim - 1)
+
+        self._inner_fn_get_match_vectors = theano.function(
+            [states['states']], transformed_states.values()[0])
+
+        self._inner_fn_get_preprocessed_attendeds = theano.function(
+            attendeds, self.preprocess(attendeds))
+
         return energies
 
     @application(outputs=['weighted_averages', 'weights'])
@@ -405,10 +413,12 @@ class SequenceMultiContentAttention(GenericSequenceAttention, Initializable):
 
     @application
     def initial_glimpses(self, name, batch_size, attended):
-        if name == "weighted_averages":
-            return tensor.zeros((batch_size, self.attended_dims[0]))
-        elif name == "weights":
-            return tensor.zeros((batch_size, attended[0].shape[0]))
+        # TODO: adapted to return initial states for both weighted_averages and
+        # weights at the same time for both calls to ensure different output
+        # names, NOTE that: ordering matters
+        if name == "weighted_averages" or name == "weights":
+            return [tensor.zeros((batch_size, self.attended_dims[0])),
+                    tensor.zeros((batch_size, attended[0].shape[0]))]
         raise ValueError("Unknown glimpse name {}".format(name))
 
     @application(inputs=['attended'],
@@ -600,9 +610,13 @@ class AttentionRecurrentWithMultiContext(AbstractAttentionRecurrent,
     @application
     def initial_state(self, state_name, batch_size, **kwargs):
         if state_name in self._glimpse_names:
+            # TODO: find a better solution to this, variable name for both
+            # weigted_averages and weights returns as the same,
+            # 'attention_initial_glimpses_output_0' which should be different
             return self.attention.initial_glimpses(
                 state_name, batch_size, [kwargs[name] for name in
-                                         self.attended_names])
+                                         self.attended_names]
+                )[self._glimpse_names.index(state_name)]
         return self.transition.initial_state(state_name, batch_size, **kwargs)
 
     def get_dim(self, name):
@@ -633,18 +647,26 @@ class SequenceGeneratorWithMultiContext(BaseSequenceGenerator):
         super(SequenceGeneratorWithMultiContext, self).__init__(
             readout, transition, **kwargs)
 
+    @application
+    def get_transition_func(
+            self, **kwargs):
+            states = dict_subset(kwargs, self._state_names, must_have=False)
+            contexts = dict_subset(kwargs, self._context_names)
+            feedback = self.readout.feedback(kwargs['outputs'])
+            inputs = self.fork.apply(feedback, as_dict=True)
+            return self.transition.apply(
+                mask=kwargs['mask'], return_initial_states=True, as_dict=True,
+                **dict_union(inputs, states, contexts))
+
 
 class Decoder(Initializable):
     def __init__(self, vocab_size, embedding_dim, state_dim,
-                 representation_dim, src_selector_rep, trg_selector_rep,
-                 num_encs, num_decs, **kwargs):
+                 representation_dim, num_encs, num_decs, **kwargs):
         super(Decoder, self).__init__(**kwargs)
         self.vocab_size = vocab_size
         self.embedding_dim = embedding_dim
         self.state_dim = state_dim
         self.representation_dim = representation_dim
-        self.src_selector_rep = src_selector_rep
-        self.trg_selector_rep = trg_selector_rep
         self.num_encs = num_encs
         self.num_decs = num_decs
 
@@ -725,6 +747,20 @@ class Decoder(Initializable):
             attended_2=trg_selector_rep,
             attended_mask=attended_mask)
 
+    @application
+    def get_decoder_transition(
+            self, representation, source_sentence_mask,
+            target_sentence_mask, target_sentence, src_selector_rep,
+            trg_selector_rep):
+
+            sg_inps = {'mask': target_sentence_mask.T,
+                       'outputs': target_sentence.T,
+                       'attended_0': representation,
+                       'attended_1': src_selector_rep,
+                       'attended_2': trg_selector_rep,
+                       'attended_mask': source_sentence_mask.T}
+            return self.sequence_generator.get_transition_func(**sg_inps)
+
 
 def main(config, tr_stream, dev_streams):
 
@@ -761,8 +797,6 @@ def main(config, tr_stream, dev_streams):
         embedding_dim=config['dec_embed'],
         state_dim=config['dec_nhids'],
         representation_dim=config['representation_dim'],
-        src_selector_rep=src_selector,
-        trg_selector_rep=trg_selector,
         num_encs=config['num_encs'],
         num_decs=config['num_decs'])
 
@@ -884,6 +918,7 @@ def main(config, tr_stream, dev_streams):
 
     # Set observables for monitoring
     observables = costs
+    observables = [[x] for x in observables]
 
     # Set extensions
     extensions = [
