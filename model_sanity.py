@@ -1,6 +1,4 @@
 # This is the RNNsearch model
-# Works with https://github.com/orhanf/blocks/tree/wmt15
-# 0e23b0193f64dc3e56da18605d53d6f5b1352848
 from collections import Counter
 import argparse
 import importlib

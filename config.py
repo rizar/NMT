@@ -30,9 +30,9 @@ def get_config_wmt15_fi_en_40k():
     config['weight_scale'] = 0.01
 
     # Regularization related
-    config['weight_noise_ff'] = False
+    config['weight_noise_ff'] = 0.01
     config['weight_noise_rec'] = False
-    config['dropout'] = 1.0
+    config['dropout'] = 0.5
 
     # Vocabulary/dataset related
     basedir = '/data/lisatmp3/firatorh/nmt/wmt15/data/fi-en/processed/'
