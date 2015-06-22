@@ -183,3 +183,62 @@ def get_config_wmt15_fi_en_40k_refMultiCG():
     config['hook_samples'] = 2
 
     return config
+
+
+def get_config_wmt15_de_en_51k_refMultiCG():
+    config = {}
+
+    # Model related
+    config['seq_len'] = 50
+    config['enc_nhids'] = 1000
+    config['dec_nhids'] = 1000
+    config['enc_embed'] = 620
+    config['dec_embed'] = 620
+    config['saveto'] = 'refMultiCG_DEEN'
+
+    # Optimization related
+    config['batch_size'] = 80
+    config['sort_k_batches'] = 12
+    config['step_rule'] = 'AdaDelta'
+    config['step_clipping'] = 10
+    config['weight_scale'] = 0.01
+
+    # Regularization related
+    config['weight_noise_ff'] = 0.01
+    config['weight_noise_rec'] = False
+    config['dropout'] = 0.5
+
+    # Vocabulary/dataset related
+
+    basedir = '/data/lisatmp3/firatorh/nmt/wmt15/data/fideen-en/'
+    config['stream'] = 'stream_fi_en'
+    config['src_vocab'] = basedir + 'de2en/vocab.de.pkl'
+    config['trg_vocab'] = basedir + 'joint_vocab.sub.en.52k.pkl'
+    config['src_data'] = basedir + 'de2en/all.tok.clean.shuf.split.de-en.de'
+    config['trg_data'] = basedir + 'de2en/all.tok.clean.shuf.de-en.en'
+    config['src_vocab_size'] = 200000
+    config['trg_vocab_size'] = 51546
+    config['unk_id'] = 1
+    config['src_eos_idx'] = 0
+    config['trg_eos_idx'] = 0
+
+    # Early stopping based on bleu related
+    config['normalized_bleu'] = True
+    config['bleu_script'] = '/data/lisatmp3/firatorh/turkishParallelCorpora/iwslt14/scripts/multi-bleu.perl'
+    config['val_set'] = '/data/lisatmp3/jeasebas/nmt/data/wmt15/full/dev/tok/newstest2013.tok.de'
+    config['val_set_grndtruth'] = '/data/lisatmp3/jeasebas/nmt/data/wmt15/full/dev/tok/newstest2013.tok.en'
+    config['val_set_out'] = config['saveto'] + '/adadelta_51k_out.txt'
+    config['output_val_set'] = True
+    config['beam_size'] = 20
+
+    # Timing related
+    config['reload'] = True
+    config['save_freq'] = 1000
+    config['sampling_freq'] = 17
+    config['bleu_val_freq'] = 5000
+    config['val_burn_in'] = 60000
+
+    # Monitoring related
+    config['hook_samples'] = 2
+
+    return config
