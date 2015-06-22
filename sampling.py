@@ -362,6 +362,9 @@ class BleuValidator(SimpleExtension, SamplingBase):
         print bleu_score
         mb_subprocess.terminate()
 
+        # Save bleu scores to file
+        self._save_bleu_scores()
+
         return bleu_score
 
     def _is_valid_to_save(self, bleu_score):
@@ -397,17 +400,25 @@ class BleuValidator(SimpleExtension, SamplingBase):
             else:
                 params_to_save = self.main_loop.model.get_param_values()
 
-            # Rename accordingly for blocks compatibility
-            params_to_save = dict(
-                (k.replace('/', '-'), v) for k, v in params_to_save.items())
+            self._save_params(model, params_to_save)
+            self._save_bleu_scores()
 
-            numpy.savez(model.path, **params_to_save)
-            numpy.savez(
-                os.path.join(
-                    self.saveto,
-                    'val_bleu_scores{}.npz'.format(self.enc_id)),
-                bleu_scores=self.val_bleu_curve)
             signal.signal(signal.SIGINT, s)
+
+    def _save_params(self, model, params):
+
+        # Rename accordingly for blocks compatibility
+        params_to_save = dict(
+            (k.replace('/', '-'), v) for k, v in params.items())
+
+        numpy.savez(model.path, **params_to_save)
+
+    def _save_bleu_scores(self):
+        numpy.savez(
+            os.path.join(
+                self.saveto,
+                'val_bleu_scores{}.npz'.format(self.enc_id)),
+            bleu_scores=self.val_bleu_curve)
 
 
 class ModelInfo:
