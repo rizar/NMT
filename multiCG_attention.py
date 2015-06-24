@@ -130,6 +130,15 @@ class SequenceMultiContentAttention(GenericSequenceAttention, Initializable):
 
 class AttentionRecurrentWithMultiContext(AbstractAttentionRecurrent,
                                          Initializable):
+    """Transition block of SequenceGeneratorWithMultiContexts.
+
+    This block hosts a transition brick (GRUWithContext), an attention brick
+    (SequenceMultiContentAttention) and a distibute brick. It is initialized in
+    the initialization of SequenceGeneratorWithMultiContext internally.
+    This block is responsible of calling the wrappers for initial states,
+    taking glimpses and computing states.
+
+    """
 
     def __init__(self, num_contexts, transition, attention, **kwargs):
         super(AttentionRecurrentWithMultiContext, self).__init__(**kwargs)
@@ -148,8 +157,8 @@ class AttentionRecurrentWithMultiContext(AbstractAttentionRecurrent,
 
         normal_inputs = [name for name in self._sequence_names
                          if 'mask' not in name]
-        distribute = Distribute(normal_inputs,
-                                attention.take_glimpses.outputs[0])
+        distribute = Distribute(target_names=normal_inputs,
+                                source_name=attention.take_glimpses.outputs[0])
 
         self.transition = transition
         self.attention = attention

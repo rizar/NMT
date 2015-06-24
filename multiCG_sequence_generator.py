@@ -10,6 +10,14 @@ from theano import tensor
 
 
 class LookupFeedbackWMT15(LookupFeedback):
+    """Feedback extension to zero out initial feedback.
+
+    This brick extends LookupFeedback and overwrites its feedback method in
+    order to provide all zeros as initial feedback for Groundhog compatibility.
+    It may not be needed at all since learning BOS token is a cleaner and
+    better option in sequences.
+
+    """
 
     @application
     def feedback(self, outputs):
@@ -29,6 +37,14 @@ class LookupFeedbackWMT15(LookupFeedback):
 
 
 class SequenceGeneratorWithMultiContext(BaseSequenceGenerator):
+    """Sequence Generator that uses multiple contexts.
+
+    The reason why we have such a generator is that the Sequence Generator
+    structure in Blocks is not parametrized by its inner transition block.
+    This sequence generator is only made in order to use
+    AttentionRecurrentWithMultiContext.
+
+    """
     def __init__(self, num_contexts, readout, transition, attention=None,
                  add_contexts=True, **kwargs):
         normal_inputs = [name for name in transition.apply.sequences
@@ -40,14 +56,3 @@ class SequenceGeneratorWithMultiContext(BaseSequenceGenerator):
             name="att_trans")
         super(SequenceGeneratorWithMultiContext, self).__init__(
             readout, transition, **kwargs)
-
-    @application
-    def get_transition_func(
-            self, **kwargs):
-            states = dict_subset(kwargs, self._state_names, must_have=False)
-            contexts = dict_subset(kwargs, self._context_names)
-            feedback = self.readout.feedback(kwargs['outputs'])
-            inputs = self.fork.apply(feedback, as_dict=True)
-            return self.transition.apply(
-                mask=kwargs['mask'], return_initial_states=True, as_dict=True,
-                **dict_union(inputs, states, contexts))

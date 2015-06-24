@@ -9,6 +9,7 @@ from theano import tensor
 
 
 class BidirectionalWMT15(Bidirectional):
+    """Wrapper to use two RNNs with separate word embedding matrices."""
 
     @application
     def apply(self, forward_dict, backward_dict):
@@ -22,6 +23,31 @@ class BidirectionalWMT15(Bidirectional):
 
 
 class GRUwithContext(BaseRecurrent, Initializable):
+    """Gated Recurrent Unit that conditions on multiple contexts.
+
+    GRU that conditions not only input but also source selector.
+    Source selector is separately embedded for input, reset and update gates.
+
+    Parameters
+    ----------
+    attended_dim : int
+        The reprentation dimension of state below (encoder).
+    dim : int
+        The dimension of the hidden state.
+    context_dim : int
+        The dimension of source selector, also equal to the number of encoders
+        if multiple encoders are employed.
+    activation : :class:`.Brick`
+        The brick to apply as activation.
+
+    Notes
+    -----
+    Initial state conditions on a concatenated representation of source
+    selector and last hidden state of the encoders backward rnn. An MLP with
+    tanh activation is applied to the concatenated representation to obtain
+    initial state of GRU.
+
+    """
     def __init__(self, attended_dim, dim, context_dim, activation=None,
                  gate_activation=None, use_update_gate=True,
                  use_reset_gate=True, **kwargs):
@@ -41,15 +67,33 @@ class GRUwithContext(BaseRecurrent, Initializable):
 
         self.attended_dim = attended_dim
         self.context_dim = context_dim
-        self.initial_transformer = MLP(activations=[Tanh()],
-                                       dims=[attended_dim, self.dim],
-                                       name='state_initializer')
+
+        # Transformer for initial state
+        self.initial_transformer = MLP(
+                activations=[Tanh()],
+                dims=[attended_dim + context_dim, self.dim],
+                name='state_initializer')
         self.children.append(self.initial_transformer)
-        self.src_selector_embedder = Linear(input_dim=context_dim,
-                                            output_dim=self.dim,
-                                            use_bias=False,
-                                            name='src_selector_embedder')
+
+        # Gate transformers for source selector
+        self.src_selector_embedder = Linear(
+                input_dim=context_dim,
+                output_dim=self.dim,
+                use_bias=False,
+                name='src_selector_embedder')
         self.children.append(self.src_selector_embedder)
+        self.src_selector_embedder_update = Linear(
+                input_dim=context_dim,
+                output_dim=self.dim,
+                use_bias=False,
+                name='src_selector_embedder')
+        self.children.append(self.src_selector_embedder_update)
+        self.src_selector_embedder_reset = Linear(
+                input_dim=context_dim,
+                output_dim=self.dim,
+                use_bias=False,
+                name='src_selector_embedder')
+        self.children.append(self.src_selector_embedder_reset)
 
     @property
     def state_to_state(self):
@@ -101,17 +145,24 @@ class GRUwithContext(BaseRecurrent, Initializable):
         states_reset = states
 
         if self.use_reset_gate:
+            src_embed_reset = self.src_selector_embedder_reset.apply(
+                attended_1)
             reset_values = self.gate_activation.apply(
-                states.dot(self.state_to_reset) + reset_inputs)
+                states.dot(self.state_to_reset) +
+                reset_inputs + src_embed_reset)
             states_reset = states * reset_values
 
         src_embed = self.src_selector_embedder.apply(attended_1)
         next_states = self.activation.apply(
-            states_reset.dot(self.state_to_state) + inputs + src_embed)
+            states_reset.dot(self.state_to_state) +
+            inputs + src_embed)
 
         if self.use_update_gate:
+            src_embed_update = self.src_selector_embedder_update.apply(
+                attended_1)
             update_values = self.gate_activation.apply(
-                states.dot(self.state_to_update) + update_inputs)
+                states.dot(self.state_to_update) +
+                update_inputs + src_embed_update)
             next_states = (next_states * update_values +
                            states * (1 - update_values))
 
@@ -123,10 +174,14 @@ class GRUwithContext(BaseRecurrent, Initializable):
 
     @application
     def initial_state(self, state_name, batch_size, *args, **kwargs):
-        attended = kwargs['attended_0']
+        """Conditions on last hidden state and source selector."""
         if state_name == 'states':
-            initial_state = self.initial_transformer.apply(
-                attended[0, :, -self.attended_dim:])
+            attended_0 = kwargs['attended_0']
+            attended_1 = kwargs['attended_1']
+            attended = tensor.concatenate(
+                [attended_1, attended_0[0, :, -self.attended_dim:]],
+                axis=1)
+            initial_state = self.initial_transformer.apply(attended)
             return initial_state
         dim = self.get_dim(state_name)
         if dim == 0:
