@@ -816,3 +816,99 @@ def get_config_wmt15_fideen_en_fast_idxFix_nanFix_favorFi():
     config['bokeh_port'] = 3333
 
     return ReadOnlyDict(config)
+
+
+def get_config_wmt15_fideen_en_fast_idxFix_nanFix_favorFi_DEBUG():
+    config = {}
+
+    # Model related
+    config['num_encs'] = 3
+    config['num_decs'] = 1
+    config['seq_len'] = 50
+    config['enc_nhids_0'] = 1000
+    config['enc_nhids_1'] = 1000
+    config['enc_nhids_2'] = 800
+    config['dec_nhids'] = 1000
+    config['enc_embed_0'] = 620
+    config['enc_embed_1'] = 620
+    config['enc_embed_2'] = 420
+    config['dec_embed'] = 620
+    config['representation_dim'] = 2000  # this is the joint annotation
+                                         # dimension of encoders
+    config['saveto'] = 'multiEnc_FIDEEN_multiCG_fast_idxFix_nanFix_favorFi_DEBUG'
+
+    # Optimization related
+    config['batch_size_enc_0'] = 80
+    config['batch_size_enc_1'] = 80
+    config['batch_size_enc_2'] = 80
+    config['sort_k_batches'] = 12
+    config['step_rule'] = 'Adam'
+    config['learning_rate'] = 1e-4
+    config['step_clipping'] = 5
+    config['weight_scale'] = 0.01
+    config['schedule'] = [36, 24, 12]
+    config['save_accumulators'] = True  # algorithms' update step variables
+    config['load_accumulators'] = True  # be careful with this
+    config['exclude_encs'] = [True, True, False]
+    config['min_seq_lens'] = [0, 0, 10]
+    config['additional_excludes'] = \
+        ['/decoder/sequencegeneratorwithmulticontext/readout/lookupfeedbackwmt15/lookuptable.W']
+
+    # Regularization related
+    config['weight_noise_ff'] = False
+    config['weight_noise_rec'] = False
+    config['dropout'] = 1.0
+    config['drop_input'] = [0., 0., 0.4]
+
+    # Vocabulary/dataset related
+    basedir = '/data/lisatmp3/firatorh/nmt/wmt15/data/fideen-en/'
+    config['stream'] = 'multiCG_stream'
+    config['src_vocab_0'] = basedir + 'fi2en/vocab.fi.pkl'
+    config['src_vocab_1'] = basedir + 'de2en/vocab.de.pkl'
+    config['src_vocab_2'] = basedir + 'joint_vocab.sub.en.52k.pkl'
+    config['src_data_0'] = basedir + 'fi2en/all.tok.clean.seg.shuf2.fi-en.fi'
+    config['src_data_1'] = basedir + 'de2en/all.tok.clean.shuf.split.de-en.de'
+    config['src_data_2'] = basedir + 'es2en/all.tok.clean.shuf.es-en.en'
+    config['src_vocab_size_0'] = 40001
+    config['src_vocab_size_1'] = 200000
+    config['src_vocab_size_2'] = 40001
+    config['src_eos_idx_0'] = 40000
+    config['src_eos_idx_1'] = 0
+    config['src_eos_idx_2'] = 0
+
+    config['trg_vocab'] = basedir + 'joint_vocab.sub.en.52k.pkl'
+    config['trg_data_0'] = basedir + 'fi2en/all.tok.clean.shuf2.fi-en.en'
+    config['trg_data_1'] = basedir + 'de2en/all.tok.clean.shuf.de-en.en'
+    config['trg_data_2'] = basedir + 'es2en/all.tok.clean.shuf.es-en.en'
+    config['trg_vocab_size'] = 51546
+    config['trg_eos_idx'] = 0
+
+    config['unk_id'] = 1
+
+    # Early stopping based on bleu related
+    config['normalized_bleu'] = True
+    config['track_n_models'] = 3
+    config['bleu_script'] = '/data/lisatmp3/firatorh/turkishParallelCorpora/iwslt14/scripts/multi-bleu.perl'
+    config['val_set_0'] = '/data/lisatmp3/firatorh/nmt/wmt15/data/fi-en/dev/newsdev2015.tok.seg.fi'
+    config['val_set_1'] = '/data/lisatmp3/jeasebas/nmt/data/wmt15/full/dev/tok/newstest2013.tok.de'
+    config['val_set_grndtruth_0'] = '/data/lisatmp3/firatorh/nmt/wmt15/data/fi-en/dev/newsdev2015.tok.en'
+    config['val_set_grndtruth_1'] = '/data/lisatmp3/jeasebas/nmt/data/wmt15/full/dev/tok/newstest2013.tok.en'
+    config['val_set_out_0'] = config['saveto'] + '/validation_out_0.txt'
+    config['val_set_out_1'] = config['saveto'] + '/validation_out_1.txt'
+    config['output_val_set'] = True
+    config['beam_size'] = 12
+
+    # Timing related
+    config['reload'] = True
+    config['save_freq'] = 1000
+    config['sampling_freq'] = 17
+    config['bleu_val_freq'] = 1
+    config['val_burn_in'] = 0
+    config['finish_after'] = 10000000
+
+    # Monitoring related
+    config['hook_samples'] = 2
+    config['plot'] = False
+    config['bokeh_port'] = 3333
+
+    return ReadOnlyDict(config)
