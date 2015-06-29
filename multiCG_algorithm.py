@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 class StepClippingWithRemoveNotFinite(StepRule):
+    """Combines StepClipping and RemoveNotFinite in a single step."""
 
     def __init__(self, threshold=None, scale=0.1):
         if threshold:
@@ -45,6 +46,7 @@ class StepClippingWithRemoveNotFinite(StepRule):
 
 
 class MainLoopWithMultiCG(MainLoop):
+    """Extends MainLoop in order to handle multi CG."""
 
     def __init__(self, models, **kwargs):
         self.models = models
@@ -113,6 +115,7 @@ class MainLoopWithMultiCG(MainLoop):
 
 
 class GradientDescentWithMultiCG(object):
+    """Gradient Descent that trains only one CG at a time, among many."""
 
     def __init__(self, costs, params, step_rule, drop_input=None, **kwargs):
         self.num_cgs = len(costs)

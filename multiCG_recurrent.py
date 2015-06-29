@@ -47,6 +47,9 @@ class GRUwithContext(BaseRecurrent, Initializable):
     tanh activation is applied to the concatenated representation to obtain
     initial state of GRU.
 
+    TODO: Computation of attended embedders should be carried outside of scan
+          step function for speed up.
+
     """
     def __init__(self, attended_dim, dim, context_dim, activation=None,
                  gate_activation=None, use_update_gate=True,
@@ -145,6 +148,7 @@ class GRUwithContext(BaseRecurrent, Initializable):
         states_reset = states
 
         if self.use_reset_gate:
+            # TODO: move this computation out
             src_embed_reset = self.src_selector_embedder_reset.apply(
                 attended_1)
             reset_values = self.gate_activation.apply(
@@ -152,12 +156,14 @@ class GRUwithContext(BaseRecurrent, Initializable):
                 reset_inputs + src_embed_reset)
             states_reset = states * reset_values
 
+        # TODO: move this computation out
         src_embed = self.src_selector_embedder.apply(attended_1)
         next_states = self.activation.apply(
             states_reset.dot(self.state_to_state) +
             inputs + src_embed)
 
         if self.use_update_gate:
+            # TODO: move this computation out
             src_embed_update = self.src_selector_embedder_update.apply(
                 attended_1)
             update_values = self.gate_activation.apply(

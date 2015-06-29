@@ -62,6 +62,7 @@ class InitializableFeedforwardSequence(FeedforwardSequence, Initializable):
 
 
 class MultiEncoder(Initializable):
+    """Encapsulates multiple encoders, each having its own representation."""
 
     def __init__(self, num_encs, num_decs, src_vocab_sizes, enc_embed_sizes,
                  enc_nhids, representation_dim, **kwargs):
@@ -113,6 +114,8 @@ class MultiEncoder(Initializable):
 
 
 class BidirectionalEncoder(Initializable):
+    """Bidirectional Encoder with completely separate parameters."""
+
     def __init__(self, vocab_size, embedding_dim, state_dim, enc_id, **kwargs):
         super(BidirectionalEncoder, self).__init__(**kwargs)
         self.vocab_size = vocab_size
@@ -163,6 +166,8 @@ class BidirectionalEncoder(Initializable):
 
 
 class Decoder(Initializable):
+    """Decoder that equipped with a special type of attention."""
+
     def __init__(self, vocab_size, embedding_dim, state_dim,
                  representation_dim, num_encs, num_decs, **kwargs):
         super(Decoder, self).__init__(**kwargs)

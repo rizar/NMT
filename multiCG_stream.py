@@ -19,6 +19,7 @@ num_encs = config['num_encs']
 
 
 class MultiEncStream(Transformer, six.Iterator):
+    """Stream manager that selects among multiple streams."""
 
     def __init__(self, streams, schedule, batch_sizes):
 
