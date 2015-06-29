@@ -18,26 +18,6 @@ from model_multi_enc import config
 num_encs = config['num_encs']
 
 
-class PrintMultiStream(SimpleExtension):
-    """Prints number of batches seen for each data stream"""
-    def __init__(self, **kwargs):
-        super(PrintMultiStream, self).__init__(**kwargs)
-
-    def do(self, which_callback, *args):
-        counters = self.main_loop.data_stream.training_counter
-        epochs = self.main_loop.data_stream.epoch_counter
-        sid = self.main_loop.data_stream.curr_id
-        src_size = args[0]['source'].shape
-        trg_size = args[0]['target'].shape
-        msg = ['Source_{}:iter[{}]-epoch[{}]'.format(i, c, e)
-               for i, (c, e) in enumerate(zip(counters, epochs))]
-        print("Multi-stream status:")
-        print "\t", "Using stream: source_{}".format(sid)
-        print "\t", "Source shape: {}".format(src_size)
-        print "\t", "Target shape: {}".format(trg_size)
-        print "\t", " ".join(msg)
-
-
 class MultiEncStream(Transformer, six.Iterator):
 
     def __init__(self, streams, schedule, batch_sizes):
@@ -244,6 +224,11 @@ dev_streams = []
 for i in xrange(config['num_encs']):
     if 'val_set_%d' % i in config and config['val_set_%d' % i]:
         dev_file = config['val_set_%d' % i]
-        dev_dataset = TextFile(
-            [dev_file], cPickle.load(open(src_vocabs[i])), None)
+
+        # Get dictionary and fix EOS
+        dictionary = cPickle.load(open(src_vocabs[i]))
+        dictionary['</S>'] = config['src_eos_idx_%d' % i]
+
+        # Get as a text file and convert it into a stream
+        dev_dataset = TextFile([dev_file], dictionary, None)
         dev_streams.append(DataStream(dev_dataset))

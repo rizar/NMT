@@ -17,7 +17,28 @@ from blocks.extensions.saveload import LoadFromDump, Dump
 logger = logging.getLogger(__name__)
 
 
+class PrintMultiStream(SimpleExtension):
+    """Prints number of batches seen for each data stream"""
+    def __init__(self, **kwargs):
+        super(PrintMultiStream, self).__init__(**kwargs)
+
+    def do(self, which_callback, *args):
+        counters = self.main_loop.data_stream.training_counter
+        epochs = self.main_loop.data_stream.epoch_counter
+        sid = self.main_loop.data_stream.curr_id
+        src_size = args[0]['source'].shape
+        trg_size = args[0]['target'].shape
+        msg = ['Source_{}:iter[{}]-epoch[{}]'.format(i, c, e)
+               for i, (c, e) in enumerate(zip(counters, epochs))]
+        print("Multi-stream status:")
+        print "\t", "Using stream: source_{}".format(sid)
+        print "\t", "Source shape: {}".format(src_size)
+        print "\t", "Target shape: {}".format(trg_size)
+        print "\t", " ".join(msg)
+
+
 class IncrementalDump(SimpleExtension):
+    """Incrementally dumps model given frequency."""
 
     def __init__(self, saveto, **kwargs):
         raise NotImplementedError("To be implemented!")
@@ -41,10 +62,10 @@ class IncrementalDump(SimpleExtension):
 
 
 class TrainingDataMonitoringWithMultiCG(SimpleExtension, MonitoringExtension):
+    """Monitors and logs variables for multi CG."""
 
     def __init__(self, variables, **kwargs):
-        """Variables should be a list of list
-        """
+        """Variables should be a list of list."""
         num_cgs = len(variables)
         kwargs.setdefault("before_training", True)
         super(TrainingDataMonitoringWithMultiCG, self).__init__(**kwargs)
@@ -91,6 +112,7 @@ class TrainingDataMonitoringWithMultiCG(SimpleExtension, MonitoringExtension):
 
 class SimpleTrainingDataMonitoringWithMultiCG(SimpleExtension,
                                               MonitoringExtension):
+    """Alternative monitor for TrainingDataMonitoring."""
 
     def __init__(self, **kwargs):
         super(SimpleTrainingDataMonitoringWithMultiCG, self).__init__(**kwargs)
@@ -109,6 +131,7 @@ class SimpleTrainingDataMonitoringWithMultiCG(SimpleExtension,
 
 
 class MainLoopDumpManagerWMT15(MainLoopDumpManager):
+    """Checkpointintg for multi CG main loop."""
 
     def __init__(self, saveto, save_accumulators=False,
                  load_accumulators=False):
